@@ -516,10 +516,18 @@ void Deserializer::DecodeReservation(
 
 
 void Deserializer::FlushICacheForNewCodeObjects() {
-  PageIterator it(isolate_->heap()->code_space());
-  while (it.has_next()) {
-    Page* p = it.next();
-    CpuFeatures::FlushICache(p->area_start(), p->area_end() - p->area_start());
+  if (!deserializing_user_code_) {
+    // The entire isolate is newly deserialized. Simply flush all code pages.
+    PageIterator it(isolate_->heap()->code_space());
+    while (it.has_next()) {
+      Page* p = it.next();
+      CpuFeatures::FlushICache(p->area_start(),
+                               p->area_end() - p->area_start());
+    }
+  }
+  for (Code* code : new_code_objects_) {
+    CpuFeatures::FlushICache(code->instruction_start(),
+                             code->instruction_size());
   }
 }
 
@@ -556,14 +564,18 @@ void Deserializer::Deserialize(Isolate* isolate) {
   DCHECK_NULL(isolate_->thread_manager()->FirstThreadStateInUse());
   // No active handles.
   DCHECK(isolate_->handle_scope_implementer()->blocks()->is_empty());
-  isolate_->heap()->IterateSmiRoots(this);
-  isolate_->heap()->IterateStrongRoots(this, VISIT_ONLY_STRONG);
-  isolate_->heap()->RepairFreeListsAfterDeserialization();
-  isolate_->heap()->IterateWeakRoots(this, VISIT_ALL);
-  DeserializeDeferredObjects();
+
+  {
+    DisallowHeapAllocation no_gc;
+    isolate_->heap()->IterateSmiRoots(this);
+    isolate_->heap()->IterateStrongRoots(this, VISIT_ONLY_STRONG);
+    isolate_->heap()->RepairFreeListsAfterDeserialization();
+    isolate_->heap()->IterateWeakRoots(this, VISIT_ALL);
+    DeserializeDeferredObjects();
+  }
 
   isolate_->heap()->set_native_contexts_list(
-      isolate_->heap()->undefined_value());
+      isolate_->heap()->code_stub_context());
 
   // The allocation site list is build during root iteration, but if no sites
   // were encountered then it needs to be initialized to undefined.
@@ -575,6 +587,13 @@ void Deserializer::Deserialize(Isolate* isolate) {
   // Update data pointers to the external strings containing natives sources.
   for (int i = 0; i < Natives::GetBuiltinsCount(); i++) {
     Object* source = isolate_->heap()->natives_source_cache()->get(i);
+    if (!source->IsUndefined()) {
+      ExternalOneByteString::cast(source)->update_data_cache();
+    }
+  }
+
+  for (int i = 0; i < CodeStubNatives::GetBuiltinsCount(); i++) {
+    Object* source = isolate_->heap()->code_stub_natives_source_cache()->get(i);
     if (!source->IsUndefined()) {
       ExternalOneByteString::cast(source)->update_data_cache();
     }
@@ -609,12 +628,12 @@ MaybeHandle<Object> Deserializer::DeserializePartial(
   Object* root;
   Object* outdated_contexts;
   VisitPointer(&root);
-  VisitPointer(&outdated_contexts);
   DeserializeDeferredObjects();
+  VisitPointer(&outdated_contexts);
 
-  // There's no code deserialized here. If this assert fires
-  // then that's changed and logging should be added to notify
-  // the profiler et al of the new code.
+  // There's no code deserialized here. If this assert fires then that's
+  // changed and logging should be added to notify the profiler et al of the
+  // new code, which also has to be flushed from instruction cache.
   CHECK_EQ(start_address, code_space->top());
   CHECK(outdated_contexts->IsFixedArray());
   *outdated_contexts_out =
@@ -630,11 +649,17 @@ MaybeHandle<SharedFunctionInfo> Deserializer::DeserializeCode(
     return Handle<SharedFunctionInfo>();
   } else {
     deserializing_user_code_ = true;
-    DisallowHeapAllocation no_gc;
-    Object* root;
-    VisitPointer(&root);
-    DeserializeDeferredObjects();
-    return Handle<SharedFunctionInfo>(SharedFunctionInfo::cast(root));
+    HandleScope scope(isolate);
+    Handle<SharedFunctionInfo> result;
+    {
+      DisallowHeapAllocation no_gc;
+      Object* root;
+      VisitPointer(&root);
+      DeserializeDeferredObjects();
+      result = Handle<SharedFunctionInfo>(SharedFunctionInfo::cast(root));
+    }
+    CommitNewInternalizedStrings(isolate);
+    return scope.CloseAndEscape(result);
   }
 }
 
@@ -667,9 +692,8 @@ void Deserializer::DeserializeDeferredObjects() {
     Object** end = reinterpret_cast<Object**>(obj_address + size);
     bool filled = ReadData(start, end, space, obj_address);
     CHECK(filled);
-    if (object->IsAllocationSite()) {
-      RelinkAllocationSite(AllocationSite::cast(object));
-    }
+    DCHECK(CanBeDeferred(object));
+    PostProcessNewObject(object, space);
   }
 }
 
@@ -700,48 +724,75 @@ class StringTableInsertionKey : public HashTableKey {
     return handle(string_, isolate);
   }
 
+ private:
   String* string_;
   uint32_t hash_;
+  DisallowHeapAllocation no_gc;
 };
 
 
-HeapObject* Deserializer::PostProcessNewObject(HeapObject* obj) {
-  DCHECK(deserializing_user_code());
-  if (obj->IsString()) {
-    String* string = String::cast(obj);
-    // Uninitialize hash field as the hash seed may have changed.
-    string->set_hash_field(String::kEmptyHashField);
-    if (string->IsInternalizedString()) {
-      DisallowHeapAllocation no_gc;
-      HandleScope scope(isolate_);
-      StringTableInsertionKey key(string);
-      String* canonical = *StringTable::LookupKey(isolate_, &key);
-      string->SetForwardedInternalizedString(canonical);
-      return canonical;
+HeapObject* Deserializer::PostProcessNewObject(HeapObject* obj, int space) {
+  if (deserializing_user_code()) {
+    if (obj->IsString()) {
+      String* string = String::cast(obj);
+      // Uninitialize hash field as the hash seed may have changed.
+      string->set_hash_field(String::kEmptyHashField);
+      if (string->IsInternalizedString()) {
+        // Canonicalize the internalized string. If it already exists in the
+        // string table, set it to forward to the existing one.
+        StringTableInsertionKey key(string);
+        String* canonical = StringTable::LookupKeyIfExists(isolate_, &key);
+        if (canonical == NULL) {
+          new_internalized_strings_.Add(handle(string));
+          return string;
+        } else {
+          string->SetForwardedInternalizedString(canonical);
+          return canonical;
+        }
+      }
+    } else if (obj->IsScript()) {
+      // Assign a new script id to avoid collision.
+      Script::cast(obj)->set_id(isolate_->heap()->NextScriptId());
+    } else {
+      DCHECK(CanBeDeferred(obj));
     }
-  } else if (obj->IsScript()) {
-    Script::cast(obj)->set_id(isolate_->heap()->NextScriptId());
-  } else {
-    DCHECK(CanBeDeferred(obj));
   }
+  if (obj->IsAllocationSite()) {
+    DCHECK(obj->IsAllocationSite());
+    // Allocation sites are present in the snapshot, and must be linked into
+    // a list at deserialization time.
+    AllocationSite* site = AllocationSite::cast(obj);
+    // TODO(mvstanton): consider treating the heap()->allocation_sites_list()
+    // as a (weak) root. If this root is relocated correctly, this becomes
+    // unnecessary.
+    if (isolate_->heap()->allocation_sites_list() == Smi::FromInt(0)) {
+      site->set_weak_next(isolate_->heap()->undefined_value());
+    } else {
+      site->set_weak_next(isolate_->heap()->allocation_sites_list());
+    }
+    isolate_->heap()->set_allocation_sites_list(site);
+  } else if (obj->IsCode()) {
+    // We flush all code pages after deserializing the startup snapshot. In that
+    // case, we only need to remember code objects in the large object space.
+    // When deserializing user code, remember each individual code object.
+    if (deserializing_user_code() || space == LO_SPACE) {
+      new_code_objects_.Add(Code::cast(obj));
+    }
+  }
+  // Check alignment.
+  DCHECK_EQ(0, Heap::GetFillToAlign(obj->address(), obj->RequiredAlignment()));
   return obj;
 }
 
 
-void Deserializer::RelinkAllocationSite(AllocationSite* obj) {
-  DCHECK(obj->IsAllocationSite());
-  // Allocation sites are present in the snapshot, and must be linked into
-  // a list at deserialization time.
-  AllocationSite* site = AllocationSite::cast(obj);
-  // TODO(mvstanton): consider treating the heap()->allocation_sites_list()
-  // as a (weak) root. If this root is relocated correctly,
-  // RelinkAllocationSite() isn't necessary.
-  if (isolate_->heap()->allocation_sites_list() == Smi::FromInt(0)) {
-    site->set_weak_next(isolate_->heap()->undefined_value());
-  } else {
-    site->set_weak_next(isolate_->heap()->allocation_sites_list());
+void Deserializer::CommitNewInternalizedStrings(Isolate* isolate) {
+  StringTable::EnsureCapacityForDeserialization(
+      isolate, new_internalized_strings_.length());
+  for (Handle<String> string : new_internalized_strings_) {
+    StringTableInsertionKey key(*string);
+    DCHECK_NULL(StringTable::LookupKeyIfExists(isolate, &key));
+    StringTable::LookupKey(isolate, &key);
   }
-  isolate_->heap()->set_allocation_sites_list(site);
 }
 
 
@@ -757,8 +808,14 @@ HeapObject* Deserializer::GetBackReferencedObject(int space) {
     uint32_t chunk_index = back_reference.chunk_index();
     DCHECK_LE(chunk_index, current_chunk_[space]);
     uint32_t chunk_offset = back_reference.chunk_offset();
-    obj = HeapObject::FromAddress(reservations_[space][chunk_index].start +
-                                  chunk_offset);
+    Address address = reservations_[space][chunk_index].start + chunk_offset;
+    if (next_alignment_ != kWordAligned) {
+      int padding = Heap::GetFillToAlign(address, next_alignment_);
+      next_alignment_ = kWordAligned;
+      DCHECK(padding == 0 || HeapObject::FromAddress(address)->IsFiller());
+      address += padding;
+    }
+    obj = HeapObject::FromAddress(address);
   }
   if (deserializing_user_code() && obj->IsInternalizedString()) {
     obj = String::cast(obj)->GetForwardedInternalizedString();
@@ -776,22 +833,25 @@ HeapObject* Deserializer::GetBackReferencedObject(int space) {
 void Deserializer::ReadObject(int space_number, Object** write_back) {
   Address address;
   HeapObject* obj;
-  int next_int = source_.GetInt();
+  int size = source_.GetInt() << kObjectAlignmentBits;
 
-  bool double_align = false;
-#ifndef V8_HOST_ARCH_64_BIT
-  double_align = next_int == kDoubleAlignmentSentinel;
-  if (double_align) next_int = source_.GetInt();
-#endif
-
-  DCHECK_NE(kDoubleAlignmentSentinel, next_int);
-  int size = next_int << kObjectAlignmentBits;
-  int reserved_size = size + (double_align ? kPointerSize : 0);
-  address = Allocate(space_number, reserved_size);
-  obj = HeapObject::FromAddress(address);
-  if (double_align) {
-    obj = isolate_->heap()->DoubleAlignForDeserialization(obj, reserved_size);
+  if (next_alignment_ != kWordAligned) {
+    int reserved = size + Heap::GetMaximumFillToAlign(next_alignment_);
+    address = Allocate(space_number, reserved);
+    obj = HeapObject::FromAddress(address);
+    // If one of the following assertions fails, then we are deserializing an
+    // aligned object when the filler maps have not been deserialized yet.
+    // We require filler maps as padding to align the object.
+    Heap* heap = isolate_->heap();
+    DCHECK(heap->free_space_map()->IsMap());
+    DCHECK(heap->one_pointer_filler_map()->IsMap());
+    DCHECK(heap->two_pointer_filler_map()->IsMap());
+    obj = heap->AlignWithFiller(obj, size, reserved, next_alignment_);
     address = obj->address();
+    next_alignment_ = kWordAligned;
+  } else {
+    address = Allocate(space_number, size);
+    obj = HeapObject::FromAddress(address);
   }
 
   isolate_->heap()->OnAllocationEvent(obj, size);
@@ -803,12 +863,8 @@ void Deserializer::ReadObject(int space_number, Object** write_back) {
 
   if (ReadData(current, limit, space_number, address)) {
     // Only post process if object content has not been deferred.
-    if (obj->IsAllocationSite()) {
-      RelinkAllocationSite(AllocationSite::cast(obj));
-    }
+    obj = PostProcessNewObject(obj, space_number);
   }
-
-  if (deserializing_user_code()) obj = PostProcessNewObject(obj);
 
   Object* write_back_obj = obj;
   UnalignedCopy(write_back, &write_back_obj);
@@ -855,6 +911,17 @@ Address Deserializer::Allocate(int space_index, int size) {
 #endif
     return address;
   }
+}
+
+
+Object** Deserializer::CopyInNativesSource(Vector<const char> source_vector,
+                                           Object** current) {
+  DCHECK(!isolate_->heap()->deserialization_complete());
+  NativesExternalStringResource* resource = new NativesExternalStringResource(
+      source_vector.start(), source_vector.length());
+  Object* resource_obj = reinterpret_cast<Object*>(resource);
+  UnalignedCopy(current++, &resource_obj);
+  return current;
 }
 
 
@@ -990,14 +1057,17 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
   FOUR_CASES(byte_code + 8)               \
   FOUR_CASES(byte_code + 12)
 
+#define SINGLE_CASE(where, how, within, space) \
+  CASE_STATEMENT(where, how, within, space)    \
+  CASE_BODY(where, how, within, space)
+
       // Deserialize a new object and write a pointer to it to the current
       // object.
       ALL_SPACES(kNewObject, kPlain, kStartOfObject)
       // Support for direct instruction pointers in functions.  It's an inner
       // pointer because it points at the entry point, not at the start of the
       // code object.
-      CASE_STATEMENT(kNewObject, kPlain, kInnerPointer, CODE_SPACE)
-      CASE_BODY(kNewObject, kPlain, kInnerPointer, CODE_SPACE)
+      SINGLE_CASE(kNewObject, kPlain, kInnerPointer, CODE_SPACE)
       // Deserialize a new code object and write a pointer to its first
       // instruction to the current code object.
       ALL_SPACES(kNewObject, kFromCode, kInnerPointer)
@@ -1006,15 +1076,15 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
       ALL_SPACES(kBackref, kPlain, kStartOfObject)
       ALL_SPACES(kBackrefWithSkip, kPlain, kStartOfObject)
 #if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) || \
-    defined(V8_TARGET_ARCH_PPC) || V8_OOL_CONSTANT_POOL
+    defined(V8_TARGET_ARCH_PPC) || V8_EMBEDDED_CONSTANT_POOL
       // Deserialize a new object from pointer found in code and write
       // a pointer to it to the current object. Required only for MIPS, PPC or
-      // ARM with ool constant pool, and omitted on the other architectures
+      // ARM with embedded constant pool, and omitted on the other architectures
       // because it is fully unrolled and would cause bloat.
       ALL_SPACES(kNewObject, kFromCode, kStartOfObject)
       // Find a recently deserialized code object using its offset from the
       // current allocation point and write a pointer to it to the current
-      // object. Required only for MIPS, PPC or ARM with ool constant pool.
+      // object. Required only for MIPS, PPC or ARM with embedded constant pool.
       ALL_SPACES(kBackref, kFromCode, kStartOfObject)
       ALL_SPACES(kBackrefWithSkip, kFromCode, kStartOfObject)
 #endif
@@ -1028,45 +1098,33 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
       ALL_SPACES(kBackrefWithSkip, kPlain, kInnerPointer)
       // Find an object in the roots array and write a pointer to it to the
       // current object.
-      CASE_STATEMENT(kRootArray, kPlain, kStartOfObject, 0)
-      CASE_BODY(kRootArray, kPlain, kStartOfObject, 0)
-#if defined(V8_TARGET_ARCH_MIPS) || V8_OOL_CONSTANT_POOL || \
-    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_PPC)
+      SINGLE_CASE(kRootArray, kPlain, kStartOfObject, 0)
+#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) || \
+    defined(V8_TARGET_ARCH_PPC) || V8_EMBEDDED_CONSTANT_POOL
       // Find an object in the roots array and write a pointer to it to in code.
-      CASE_STATEMENT(kRootArray, kFromCode, kStartOfObject, 0)
-      CASE_BODY(kRootArray, kFromCode, kStartOfObject, 0)
+      SINGLE_CASE(kRootArray, kFromCode, kStartOfObject, 0)
 #endif
       // Find an object in the partial snapshots cache and write a pointer to it
       // to the current object.
-      CASE_STATEMENT(kPartialSnapshotCache, kPlain, kStartOfObject, 0)
-      CASE_BODY(kPartialSnapshotCache, kPlain, kStartOfObject, 0)
+      SINGLE_CASE(kPartialSnapshotCache, kPlain, kStartOfObject, 0)
       // Find an code entry in the partial snapshots cache and
       // write a pointer to it to the current object.
-      CASE_STATEMENT(kPartialSnapshotCache, kPlain, kInnerPointer, 0)
-      CASE_BODY(kPartialSnapshotCache, kPlain, kInnerPointer, 0)
+      SINGLE_CASE(kPartialSnapshotCache, kPlain, kInnerPointer, 0)
       // Find an external reference and write a pointer to it to the current
       // object.
-      CASE_STATEMENT(kExternalReference, kPlain, kStartOfObject, 0)
-      CASE_BODY(kExternalReference, kPlain, kStartOfObject, 0)
+      SINGLE_CASE(kExternalReference, kPlain, kStartOfObject, 0)
       // Find an external reference and write a pointer to it in the current
       // code object.
-      CASE_STATEMENT(kExternalReference, kFromCode, kStartOfObject, 0)
-      CASE_BODY(kExternalReference, kFromCode, kStartOfObject, 0)
+      SINGLE_CASE(kExternalReference, kFromCode, kStartOfObject, 0)
       // Find an object in the attached references and write a pointer to it to
       // the current object.
-      CASE_STATEMENT(kAttachedReference, kPlain, kStartOfObject, 0)
-      CASE_BODY(kAttachedReference, kPlain, kStartOfObject, 0)
-      CASE_STATEMENT(kAttachedReference, kPlain, kInnerPointer, 0)
-      CASE_BODY(kAttachedReference, kPlain, kInnerPointer, 0)
-      CASE_STATEMENT(kAttachedReference, kFromCode, kInnerPointer, 0)
-      CASE_BODY(kAttachedReference, kFromCode, kInnerPointer, 0)
+      SINGLE_CASE(kAttachedReference, kPlain, kStartOfObject, 0)
+      SINGLE_CASE(kAttachedReference, kPlain, kInnerPointer, 0)
+      SINGLE_CASE(kAttachedReference, kFromCode, kInnerPointer, 0)
       // Find a builtin and write a pointer to it to the current object.
-      CASE_STATEMENT(kBuiltin, kPlain, kStartOfObject, 0)
-      CASE_BODY(kBuiltin, kPlain, kStartOfObject, 0)
-      CASE_STATEMENT(kBuiltin, kPlain, kInnerPointer, 0)
-      CASE_BODY(kBuiltin, kPlain, kInnerPointer, 0)
-      CASE_STATEMENT(kBuiltin, kFromCode, kInnerPointer, 0)
-      CASE_BODY(kBuiltin, kFromCode, kInnerPointer, 0)
+      SINGLE_CASE(kBuiltin, kPlain, kStartOfObject, 0)
+      SINGLE_CASE(kBuiltin, kPlain, kInnerPointer, 0)
+      SINGLE_CASE(kBuiltin, kFromCode, kInnerPointer, 0)
 
 #undef CASE_STATEMENT
 #undef CASE_BODY
@@ -1119,6 +1177,10 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
         // Deferred can only occur right after the heap object header.
         DCHECK(current == reinterpret_cast<Object**>(current_object_address +
                                                      kPointerSize));
+        HeapObject* obj = HeapObject::FromAddress(current_object_address);
+        // If the deferred object is a map, its instance type may be used
+        // during deserialization. Initialize it with a temporary value.
+        if (obj->IsMap()) Map::cast(obj)->set_instance_type(FILLER_TYPE);
         current = limit;
         return false;
       }
@@ -1129,17 +1191,15 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
         CHECK(false);
         break;
 
-      case kNativesStringResource: {
-        DCHECK(!isolate_->heap()->deserialization_complete());
-        int index = source_.Get();
-        Vector<const char> source_vector = Natives::GetScriptSource(index);
-        NativesExternalStringResource* resource =
-            new NativesExternalStringResource(source_vector.start(),
-                                              source_vector.length());
-        Object* resource_obj = reinterpret_cast<Object*>(resource);
-        UnalignedCopy(current++, &resource_obj);
+      case kNativesStringResource:
+        current = CopyInNativesSource(Natives::GetScriptSource(source_.Get()),
+                                      current);
         break;
-      }
+
+      case kCodeStubNativesStringResource:
+        current = CopyInNativesSource(
+            CodeStubNatives::GetScriptSource(source_.Get()), current);
+        break;
 
       // Deserialize raw data of variable length.
       case kVariableRawData: {
@@ -1154,6 +1214,15 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
         Object* object = current[-1];
         DCHECK(!isolate->heap()->InNewSpace(object));
         for (int i = 0; i < repeats; i++) UnalignedCopy(current++, &object);
+        break;
+      }
+
+      case kAlignmentPrefix:
+      case kAlignmentPrefix + 1:
+      case kAlignmentPrefix + 2: {
+        DCHECK_EQ(kWordAligned, next_alignment_);
+        next_alignment_ =
+            static_cast<AllocationAlignment>(data - (kAlignmentPrefix - 1));
         break;
       }
 
@@ -1223,6 +1292,7 @@ bool Deserializer::ReadData(Object** current, Object** limit, int source_space,
 
 #undef SIXTEEN_CASES
 #undef FOUR_CASES
+#undef SINGLE_CASE
 
       default:
         CHECK(false);
@@ -1365,10 +1435,21 @@ void PartialSerializer::Serialize(Object** o) {
     Context* context = Context::cast(*o);
     global_object_ = context->global_object();
     back_reference_map()->AddGlobalProxy(context->global_proxy());
+    // The bootstrap snapshot has a code-stub context. When serializing the
+    // partial snapshot, it is chained into the weak context list on the isolate
+    // and it's next context pointer may point to the code-stub context.  Clear
+    // it before serializing, it will get re-added to the context list
+    // explicitly when it's loaded.
+    if (context->IsNativeContext()) {
+      context->set(Context::NEXT_CONTEXT_LINK,
+                   isolate_->heap()->undefined_value());
+      DCHECK(!context->global_object()->IsUndefined());
+      DCHECK(!context->builtins()->IsUndefined());
+    }
   }
   VisitPointer(o);
-  SerializeOutdatedContextsAsFixedArray();
   SerializeDeferredObjects();
+  SerializeOutdatedContextsAsFixedArray();
   Pad();
 }
 
@@ -1550,6 +1631,7 @@ bool Serializer::SerializeKnownObject(HeapObject* obj, HowToCode how_to_code,
         PrintF("\n");
       }
 
+      PutAlignmentPrefix(obj);
       AllocationSpace space = back_reference.space();
       if (skip == 0) {
         sink_->Put(kBackref + how_to_code + where_to_point + space, "BackRef");
@@ -1568,7 +1650,10 @@ bool Serializer::SerializeKnownObject(HeapObject* obj, HowToCode how_to_code,
 
 void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
                                         WhereToPoint where_to_point, int skip) {
-  DCHECK(!obj->IsJSFunction());
+  // Make sure that all functions are derived from the code-stub context
+  DCHECK(!obj->IsJSFunction() ||
+         JSFunction::cast(obj)->GetCreationContext() ==
+             isolate()->heap()->code_stub_context());
 
   int root_index = root_index_map_.Lookup(obj);
   // We can only encode roots as such if it has already been serialized.
@@ -1640,6 +1725,18 @@ void Serializer::PutBackReference(HeapObject* object, BackReference reference) {
   DCHECK(BackReferenceIsAlreadyAllocated(reference));
   sink_->PutInt(reference.reference(), "BackRefValue");
   hot_objects_.Add(object);
+}
+
+
+int Serializer::PutAlignmentPrefix(HeapObject* object) {
+  AllocationAlignment alignment = object->RequiredAlignment();
+  if (alignment != kWordAligned) {
+    DCHECK(1 <= alignment && alignment <= 3);
+    byte prefix = (kAlignmentPrefix - 1) + alignment;
+    sink_->Put(prefix, "Alignment");
+    return Heap::GetMaximumFillToAlign(alignment);
+  }
+  return 0;
 }
 
 
@@ -1724,20 +1821,10 @@ void Serializer::ObjectSerializer::SerializePrologue(AllocationSpace space,
     }
     back_reference = serializer_->AllocateLargeObject(size);
   } else {
-    bool needs_double_align = false;
-    if (object_->NeedsToEnsureDoubleAlignment()) {
-      // Add wriggle room for double alignment padding.
-      back_reference = serializer_->Allocate(space, size + kPointerSize);
-      needs_double_align = true;
-    } else {
-      back_reference = serializer_->Allocate(space, size);
-    }
+    int fill = serializer_->PutAlignmentPrefix(object_);
+    back_reference = serializer_->Allocate(space, size + fill);
     sink_->Put(kNewObject + reference_representation_ + space, "NewObject");
-    if (needs_double_align)
-      sink_->PutInt(kDoubleAlignmentSentinel, "DoubleAlignSentinel");
-    int encoded_size = size >> kObjectAlignmentBits;
-    DCHECK_NE(kDoubleAlignmentSentinel, encoded_size);
-    sink_->PutInt(encoded_size, "ObjectSizeInWords");
+    sink_->PutInt(size >> kObjectAlignmentBits, "ObjectSizeInWords");
   }
 
 #ifdef OBJECT_PRINT
@@ -1816,6 +1903,28 @@ void Serializer::ObjectSerializer::SerializeExternalString() {
 }
 
 
+// Clear and later restore the next link in the weak cell, if the object is one.
+class UnlinkWeakCellScope {
+ public:
+  explicit UnlinkWeakCellScope(HeapObject* object) : weak_cell_(NULL) {
+    if (object->IsWeakCell()) {
+      weak_cell_ = WeakCell::cast(object);
+      next_ = weak_cell_->next();
+      weak_cell_->clear_next(object->GetHeap());
+    }
+  }
+
+  ~UnlinkWeakCellScope() {
+    if (weak_cell_) weak_cell_->set_next(next_, UPDATE_WEAK_WRITE_BARRIER);
+  }
+
+ private:
+  WeakCell* weak_cell_;
+  Object* next_;
+  DisallowHeapAllocation no_gc_;
+};
+
+
 void Serializer::ObjectSerializer::Serialize() {
   if (FLAG_trace_serializer) {
     PrintF(" Encoding heap object: ");
@@ -1825,6 +1934,9 @@ void Serializer::ObjectSerializer::Serialize() {
 
   // We cannot serialize typed array objects correctly.
   DCHECK(!object_->IsJSTypedArray());
+
+  // We don't expect fillers.
+  DCHECK(!object_->IsFiller());
 
   if (object_->IsPrototypeInfo()) {
     Object* prototype_users = PrototypeInfo::cast(object_)->prototype_users();
@@ -1837,6 +1949,10 @@ void Serializer::ObjectSerializer::Serialize() {
     // Clear cached line ends.
     Object* undefined = serializer_->isolate()->heap()->undefined_value();
     Script::cast(object_)->set_line_ends(undefined);
+    Object* shared_list = Script::cast(object_)->shared_function_infos();
+    if (shared_list->IsWeakFixedArray()) {
+      WeakFixedArray::cast(shared_list)->Compact();
+    }
   }
 
   if (object_->IsExternalString()) {
@@ -1872,6 +1988,8 @@ void Serializer::ObjectSerializer::Serialize() {
     return;
   }
 
+  UnlinkWeakCellScope unlink_weak_cell(object_);
+
   object_->IterateBody(map->instance_type(), size, this);
   OutputRawData(object_->address() + size);
 }
@@ -1895,6 +2013,8 @@ void Serializer::ObjectSerializer::SerializeDeferred() {
   sink_->Put(kNewObject + reference.space(), "deferred object");
   serializer_->PutBackReference(object_, reference);
   sink_->PutInt(size >> kPointerSizeLog2, "deferred object size");
+
+  UnlinkWeakCellScope unlink_weak_cell(object_);
 
   object_->IterateBody(map->instance_type(), size, this);
   OutputRawData(object_->address() + size);
@@ -1942,9 +2062,6 @@ void Serializer::ObjectSerializer::VisitPointers(Object** start,
 
 
 void Serializer::ObjectSerializer::VisitEmbeddedPointer(RelocInfo* rinfo) {
-  // Out-of-line constant pool entries will be visited by the ConstantPoolArray.
-  if (FLAG_enable_ool_constant_pool && rinfo->IsInConstantPool()) return;
-
   int skip = OutputRawData(rinfo->target_address_address(),
                            kCanReturnSkipInsteadOfSkipping);
   HowToCode how_to_code = rinfo->IsCodedSpecially() ? kFromCode : kPlain;
@@ -2016,9 +2133,6 @@ void Serializer::ObjectSerializer::VisitRuntimeEntry(RelocInfo* rinfo) {
 
 
 void Serializer::ObjectSerializer::VisitCodeTarget(RelocInfo* rinfo) {
-  // Out-of-line constant pool entries will be visited by the ConstantPoolArray.
-  if (FLAG_enable_ool_constant_pool && rinfo->IsInConstantPool()) return;
-
   int skip = OutputRawData(rinfo->target_address_address(),
                            kCanReturnSkipInsteadOfSkipping);
   Code* object = Code::GetCodeFromTargetAddress(rinfo->target_address());
@@ -2036,9 +2150,6 @@ void Serializer::ObjectSerializer::VisitCodeEntry(Address entry_address) {
 
 
 void Serializer::ObjectSerializer::VisitCell(RelocInfo* rinfo) {
-  // Out-of-line constant pool entries will be visited by the ConstantPoolArray.
-  if (FLAG_enable_ool_constant_pool && rinfo->IsInConstantPool()) return;
-
   int skip = OutputRawData(rinfo->pc(), kCanReturnSkipInsteadOfSkipping);
   Cell* object = Cell::cast(rinfo->target_cell());
   serializer_->SerializeObject(object, kPlain, kInnerPointer, skip);
@@ -2046,24 +2157,43 @@ void Serializer::ObjectSerializer::VisitCell(RelocInfo* rinfo) {
 }
 
 
-void Serializer::ObjectSerializer::VisitExternalOneByteString(
-    v8::String::ExternalOneByteStringResource** resource_pointer) {
-  Address references_start = reinterpret_cast<Address>(resource_pointer);
-  OutputRawData(references_start);
-  for (int i = 0; i < Natives::GetBuiltinsCount(); i++) {
-    Object* source =
-        serializer_->isolate()->heap()->natives_source_cache()->get(i);
+bool Serializer::ObjectSerializer::SerializeExternalNativeSourceString(
+    int builtin_count,
+    v8::String::ExternalOneByteStringResource** resource_pointer,
+    FixedArray* source_cache, int resource_index) {
+  for (int i = 0; i < builtin_count; i++) {
+    Object* source = source_cache->get(i);
     if (!source->IsUndefined()) {
       ExternalOneByteString* string = ExternalOneByteString::cast(source);
       typedef v8::String::ExternalOneByteStringResource Resource;
       const Resource* resource = string->resource();
       if (resource == *resource_pointer) {
-        sink_->Put(kNativesStringResource, "NativesStringResource");
+        sink_->Put(resource_index, "NativesStringResource");
         sink_->PutSection(i, "NativesStringResourceEnd");
         bytes_processed_so_far_ += sizeof(resource);
-        return;
+        return true;
       }
     }
+  }
+  return false;
+}
+
+
+void Serializer::ObjectSerializer::VisitExternalOneByteString(
+    v8::String::ExternalOneByteStringResource** resource_pointer) {
+  Address references_start = reinterpret_cast<Address>(resource_pointer);
+  OutputRawData(references_start);
+  if (SerializeExternalNativeSourceString(
+          Natives::GetBuiltinsCount(), resource_pointer,
+          serializer_->isolate()->heap()->natives_source_cache(),
+          kNativesStringResource)) {
+    return;
+  }
+  if (SerializeExternalNativeSourceString(
+          CodeStubNatives::GetBuiltinsCount(), resource_pointer,
+          serializer_->isolate()->heap()->code_stub_natives_source_cache(),
+          kCodeStubNativesStringResource)) {
+    return;
   }
   // One of the strings in the natives cache should match the resource.  We
   // don't expect any other kinds of external strings here.
@@ -2086,9 +2216,7 @@ Address Serializer::ObjectSerializer::PrepareCode() {
                   RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED);
   for (RelocIterator it(code, mode_mask); !it.done(); it.next()) {
     RelocInfo* rinfo = it.rinfo();
-    if (!(FLAG_enable_ool_constant_pool && rinfo->IsInConstantPool())) {
-      rinfo->WipeOut();
-    }
+    rinfo->WipeOut();
   }
   // We need to wipe out the header fields *after* wiping out the
   // relocations, because some of these fields are needed for the latter.
@@ -2131,10 +2259,6 @@ int Serializer::ObjectSerializer::OutputRawData(
     if (is_code_object_) object_start = PrepareCode();
 
     const char* description = is_code_object_ ? "Code" : "Byte";
-#ifdef MEMORY_SANITIZER
-    // Object sizes are usually rounded up with uninitialized padding space.
-    MSAN_MEMORY_IS_INITIALIZED(object_start + base, bytes_to_output);
-#endif  // MEMORY_SANITIZER
     sink_->PutRaw(object_start + base, bytes_to_output, description);
   }
   if (to_skip != 0 && return_skip == kIgnoringReturn) {
@@ -2272,7 +2396,7 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
         DCHECK(code_object->has_reloc_info_for_serialization());
         // Only serialize the code for the toplevel function unless specified
         // by flag. Replace code of inner functions by the lazy compile builtin.
-        // This is safe, as checked in Compiler::BuildFunctionInfo.
+        // This is safe, as checked in Compiler::GetSharedFunctionInfo.
         if (code_object != main_code_ && !FLAG_serialize_inner) {
           SerializeBuiltin(Builtins::kCompileLazy, how_to_code, where_to_point);
         } else {
@@ -2299,8 +2423,6 @@ void CodeSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
 void CodeSerializer::SerializeGeneric(HeapObject* heap_object,
                                       HowToCode how_to_code,
                                       WhereToPoint where_to_point) {
-  if (heap_object->IsInternalizedString()) num_internalized_strings_++;
-
   // Object has not yet been serialized.  Serialize it here.
   ObjectSerializer serializer(this, heap_object, sink_, how_to_code,
                               where_to_point);
@@ -2404,17 +2526,13 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
 
   HandleScope scope(isolate);
 
-  SmartPointer<SerializedCodeData> scd(
+  base::SmartPointer<SerializedCodeData> scd(
       SerializedCodeData::FromCachedData(isolate, cached_data, *source));
   if (scd.is_empty()) {
     if (FLAG_profile_deserialization) PrintF("[Cached code failed check]\n");
     DCHECK(cached_data->rejected());
     return MaybeHandle<SharedFunctionInfo>();
   }
-
-  // Eagerly expand string table to avoid allocations during deserialization.
-  StringTable::EnsureCapacityForDeserialization(isolate,
-                                                scd->NumInternalizedStrings());
 
   // Prepare and register list of attached objects.
   Vector<const uint32_t> code_stub_keys = scd->CodeStubKeys();
@@ -2521,6 +2639,11 @@ Vector<const byte> SnapshotData::Payload() const {
 class Checksum {
  public:
   explicit Checksum(Vector<const byte> payload) {
+#ifdef MEMORY_SANITIZER
+    // Computing the checksum includes padding bytes for objects like strings.
+    // Mark every object as initialized in the code serializer.
+    MSAN_MEMORY_IS_INITIALIZED(payload.start(), payload.length());
+#endif  // MEMORY_SANITIZER
     // Fletcher's checksum. Modified to reduce 64-bit sums to 32-bit.
     uintptr_t a = 1;
     uintptr_t b = 0;
@@ -2579,7 +2702,6 @@ SerializedCodeData::SerializedCodeData(const List<byte>& payload,
   SetHeaderValue(kCpuFeaturesOffset,
                  static_cast<uint32_t>(CpuFeatures::SupportedFeatures()));
   SetHeaderValue(kFlagHashOffset, FlagList::Hash());
-  SetHeaderValue(kNumInternalizedStringsOffset, cs.num_internalized_strings());
   SetHeaderValue(kNumReservationsOffset, reservations.length());
   SetHeaderValue(kNumCodeStubKeysOffset, num_stub_keys);
   SetHeaderValue(kPayloadLengthOffset, payload.length());
@@ -2607,13 +2729,13 @@ SerializedCodeData::SerializedCodeData(const List<byte>& payload,
 SerializedCodeData::SanityCheckResult SerializedCodeData::SanityCheck(
     Isolate* isolate, String* source) const {
   uint32_t magic_number = GetMagicNumber();
+  if (magic_number != ComputeMagicNumber(isolate)) return MAGIC_NUMBER_MISMATCH;
   uint32_t version_hash = GetHeaderValue(kVersionHashOffset);
   uint32_t source_hash = GetHeaderValue(kSourceHashOffset);
   uint32_t cpu_features = GetHeaderValue(kCpuFeaturesOffset);
   uint32_t flags_hash = GetHeaderValue(kFlagHashOffset);
   uint32_t c1 = GetHeaderValue(kChecksum1Offset);
   uint32_t c2 = GetHeaderValue(kChecksum2Offset);
-  if (magic_number != ComputeMagicNumber(isolate)) return MAGIC_NUMBER_MISMATCH;
   if (version_hash != Version::Hash()) return VERSION_MISMATCH;
   if (source_hash != SourceHash(source)) return SOURCE_MISMATCH;
   if (cpu_features != static_cast<uint32_t>(CpuFeatures::SupportedFeatures())) {
@@ -2657,10 +2779,6 @@ Vector<const byte> SerializedCodeData::Payload() const {
 }
 
 
-int SerializedCodeData::NumInternalizedStrings() const {
-  return GetHeaderValue(kNumInternalizedStringsOffset);
-}
-
 Vector<const uint32_t> SerializedCodeData::CodeStubKeys() const {
   int reservations_size = GetHeaderValue(kNumReservationsOffset) * kInt32Size;
   const byte* start = data_ + kHeaderSize + reservations_size;
@@ -2685,4 +2803,5 @@ SerializedCodeData* SerializedCodeData::FromCachedData(Isolate* isolate,
   delete scd;
   return NULL;
 }
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

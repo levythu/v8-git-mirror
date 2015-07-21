@@ -886,8 +886,8 @@ class MacroAssembler : public Assembler {
 
   template<typename Field>
   void DecodeField(Register dst, Register src) {
-    static const uint64_t shift = Field::kShift;
-    static const uint64_t setbits = CountSetBits(Field::kMask, 32);
+    static const int shift = Field::kShift;
+    static const int setbits = CountSetBits(Field::kMask, 32);
     Ubfx(dst, src, shift, setbits);
   }
 
@@ -1304,12 +1304,6 @@ class MacroAssembler : public Assembler {
                 Register scratch2,
                 Label* gc_required,
                 AllocationFlags flags);
-
-  // Undo allocation in new space. The object passed and objects allocated after
-  // it will no longer be allocated. The caller must make sure that no pointers
-  // are left to the object(s) no longer allocated as they would be invalid when
-  // allocation is undone.
-  void UndoAllocationInNewSpace(Register object, Register scratch);
 
   void AllocateTwoByteString(Register result,
                              Register length,

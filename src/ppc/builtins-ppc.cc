@@ -233,7 +233,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   __ push(function);  // Preserve the function.
   __ IncrementCounter(counters->string_ctor_conversions(), 1, r6, r7);
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
     __ push(r3);
     __ InvokeBuiltin(Builtins::TO_STRING, CALL_FUNCTION);
   }
@@ -253,7 +253,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   __ bind(&gc_required);
   __ IncrementCounter(counters->string_ctor_gc_required(), 1, r6, r7);
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
     __ push(argument);
     __ CallRuntime(Runtime::kNewStringWrapper, 1);
   }
@@ -263,7 +263,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
 
 static void CallRuntimePassFunction(MacroAssembler* masm,
                                     Runtime::FunctionId function_id) {
-  FrameScope scope(masm, StackFrame::INTERNAL);
+  FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
   // Push a copy of the function onto the stack.
   // Push function as parameter to the runtime call.
   __ Push(r4, r4);
@@ -307,34 +307,6 @@ void Builtins::Generate_InOptimizationQueue(MacroAssembler* masm) {
 }
 
 
-static void Generate_Runtime_NewObject(MacroAssembler* masm,
-                                       bool create_memento,
-                                       Register original_constructor,
-                                       Label* count_incremented,
-                                       Label* allocated) {
-  // ----------- S t a t e -------------
-  //  -- r4: argument for Runtime_NewObject
-  // -----------------------------------
-  Register result = r7;
-
-  if (create_memento) {
-    // Get the cell or allocation site.
-    __ LoadP(r5, MemOperand(sp, 2 * kPointerSize));
-    __ Push(r5, r4, original_constructor);
-    __ CallRuntime(Runtime::kNewObjectWithAllocationSite, 3);
-    __ mr(result, r3);
-    // Runtime_NewObjectWithAllocationSite increments allocation count.
-    // Skip the increment.
-    __ b(count_incremented);
-  } else {
-    __ Push(r4, original_constructor);
-    __ CallRuntime(Runtime::kNewObject, 2);
-    __ mr(result, r3);
-    __ b(allocated);
-  }
-}
-
-
 static void Generate_JSConstructStubHelper(MacroAssembler* masm,
                                            bool is_api_function,
                                            bool create_memento) {
@@ -354,30 +326,17 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
 
   // Enter a construct frame.
   {
-    FrameScope scope(masm, StackFrame::CONSTRUCT);
+    FrameAndConstantPoolScope scope(masm, StackFrame::CONSTRUCT);
 
-    if (create_memento) {
-      __ AssertUndefinedOrAllocationSite(r5, r7);
-      __ push(r5);
-    }
-
-    // Preserve the two incoming parameters on the stack.
+    // Preserve the incoming parameters on the stack.
+    __ AssertUndefinedOrAllocationSite(r5, r7);
     __ SmiTag(r3);
-    __ Push(r3, r4);
-
-    Label rt_call, allocated, normal_new, count_incremented;
-    __ cmp(r4, r6);
-    __ beq(&normal_new);
-
-    // Original constructor and function are different.
-    Generate_Runtime_NewObject(masm, create_memento, r6, &count_incremented,
-                               &allocated);
-    __ bind(&normal_new);
+    __ Push(r5, r3, r4, r6);
 
     // Try to allocate the object without transitioning into C code. If any of
     // the preconditions is not met, the code bails out to the runtime call.
+    Label rt_call, allocated;
     if (FLAG_inline_new) {
-      Label undo_allocation;
       ExternalReference debug_step_in_fp =
           ExternalReference::debug_step_in_fp_address(isolate);
       __ mov(r5, Operand(debug_step_in_fp));
@@ -385,12 +344,16 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       __ cmpi(r5, Operand::Zero());
       __ bne(&rt_call);
 
+      // Fall back to runtime if the original constructor and function differ.
+      __ cmp(r4, r6);
+      __ bne(&rt_call);
+
       // Load the initial map and verify that it is in fact a map.
       // r4: constructor function
       __ LoadP(r5,
                FieldMemOperand(r4, JSFunction::kPrototypeOrInitialMapOffset));
       __ JumpIfSmi(r5, &rt_call);
-      __ CompareObjectType(r5, r6, r7, MAP_TYPE);
+      __ CompareObjectType(r5, r8, r7, MAP_TYPE);
       __ bne(&rt_call);
 
       // Check that the constructor is not constructing a JSFunction (see
@@ -398,7 +361,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // initial map's instance type would be JS_FUNCTION_TYPE.
       // r4: constructor function
       // r5: initial map
-      __ CompareInstanceType(r5, r6, JS_FUNCTION_TYPE);
+      __ CompareInstanceType(r5, r8, JS_FUNCTION_TYPE);
       __ beq(&rt_call);
 
       if (!is_api_function) {
@@ -428,18 +391,19 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // Now allocate the JSObject on the heap.
       // r4: constructor function
       // r5: initial map
+      Label rt_call_reload_new_target;
       __ lbz(r6, FieldMemOperand(r5, Map::kInstanceSizeOffset));
       if (create_memento) {
         __ addi(r6, r6, Operand(AllocationMemento::kSize / kPointerSize));
       }
 
-      __ Allocate(r6, r7, r8, r9, &rt_call, SIZE_IN_WORDS);
+      __ Allocate(r6, r7, r8, r9, &rt_call_reload_new_target, SIZE_IN_WORDS);
 
       // Allocated the JSObject, now initialize the fields. Map is set to
       // initial map and properties and elements are set to empty fixed array.
       // r4: constructor function
       // r5: initial map
-      // r6: object size (not including memento if create_memento)
+      // r6: object size (including memento if create_memento)
       // r7: JSObject (not tagged)
       __ LoadRoot(r9, Heap::kEmptyFixedArrayRootIndex);
       __ mr(r8, r7);
@@ -469,7 +433,9 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
         __ blt(&no_inobject_slack_tracking);
 
         // Allocate object with a slack.
-        __ lbz(r3, FieldMemOperand(r5, Map::kPreAllocatedPropertyFieldsOffset));
+        __ lbz(r3, FieldMemOperand(r5, Map::kInObjectPropertiesOffset));
+        __ lbz(r5, FieldMemOperand(r5, Map::kUnusedPropertyFieldsOffset));
+        __ sub(r3, r3, r5);
         if (FLAG_debug_code) {
           __ ShiftLeftImm(r0, r3, Operand(kPointerSizeLog2));
           __ add(r0, r8, r0);
@@ -500,7 +466,8 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
         __ LoadRoot(r10, Heap::kAllocationMementoMapRootIndex);
         __ StoreP(r10, MemOperand(r8, AllocationMemento::kMapOffset));
         // Load the AllocationSite
-        __ LoadP(r10, MemOperand(sp, 2 * kPointerSize));
+        __ LoadP(r10, MemOperand(sp, 3 * kPointerSize));
+        __ AssertUndefinedOrAllocationSite(r10, r3);
         __ StoreP(r10,
                   MemOperand(r8, AllocationMemento::kAllocationSiteOffset));
         __ addi(r8, r8, Operand(AllocationMemento::kAllocationSiteOffset +
@@ -510,108 +477,46 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       }
 
       // Add the object tag to make the JSObject real, so that we can continue
-      // and jump into the continuation code at any time from now on. Any
-      // failures need to undo the allocation, so that the heap is in a
-      // consistent state and verifiable.
+      // and jump into the continuation code at any time from now on.
       __ addi(r7, r7, Operand(kHeapObjectTag));
 
-      // Check if a non-empty properties array is needed. Continue with
-      // allocated object if not fall through to runtime call if it is.
-      // r4: constructor function
-      // r7: JSObject
-      // r8: start of next object (not tagged)
-      __ lbz(r6, FieldMemOperand(r5, Map::kUnusedPropertyFieldsOffset));
-      // The field instance sizes contains both pre-allocated property fields
-      // and in-object properties.
-      __ lbz(r0, FieldMemOperand(r5, Map::kPreAllocatedPropertyFieldsOffset));
-      __ add(r6, r6, r0);
-      __ lbz(r0, FieldMemOperand(r5, Map::kInObjectPropertiesOffset));
-      __ sub(r6, r6, r0, LeaveOE, SetRC);
-
-      // Done if no extra properties are to be allocated.
-      __ beq(&allocated, cr0);
-      __ Assert(ge, kPropertyAllocationCountFailed, cr0);
-
-      // Scale the number of elements by pointer size and add the header for
-      // FixedArrays to the start of the next object calculation from above.
-      // r4: constructor
-      // r6: number of elements in properties array
-      // r7: JSObject
-      // r8: start of next object
-      __ addi(r3, r6, Operand(FixedArray::kHeaderSize / kPointerSize));
-      __ Allocate(
-          r3, r8, r9, r5, &undo_allocation,
-          static_cast<AllocationFlags>(RESULT_CONTAINS_TOP | SIZE_IN_WORDS));
-
-      // Initialize the FixedArray.
-      // r4: constructor
-      // r6: number of elements in properties array
-      // r7: JSObject
-      // r8: FixedArray (not tagged)
-      __ LoadRoot(r9, Heap::kFixedArrayMapRootIndex);
-      __ mr(r5, r8);
-      DCHECK_EQ(0 * kPointerSize, JSObject::kMapOffset);
-      __ StoreP(r9, MemOperand(r5));
-      DCHECK_EQ(1 * kPointerSize, FixedArray::kLengthOffset);
-      __ SmiTag(r3, r6);
-      __ StoreP(r3, MemOperand(r5, kPointerSize));
-      __ addi(r5, r5, Operand(2 * kPointerSize));
-
-      // Initialize the fields to undefined.
-      // r4: constructor function
-      // r5: First element of FixedArray (not tagged)
-      // r6: number of elements in properties array
-      // r7: JSObject
-      // r8: FixedArray (not tagged)
-      DCHECK_EQ(2 * kPointerSize, FixedArray::kHeaderSize);
-      {
-        Label done;
-        __ cmpi(r6, Operand::Zero());
-        __ beq(&done);
-        if (!is_api_function || create_memento) {
-          __ LoadRoot(r10, Heap::kUndefinedValueRootIndex);
-        } else if (FLAG_debug_code) {
-          __ LoadRoot(r11, Heap::kUndefinedValueRootIndex);
-          __ cmp(r10, r11);
-          __ Assert(eq, kUndefinedValueNotLoaded);
-        }
-        __ InitializeNFieldsWithFiller(r5, r6, r10);
-        __ bind(&done);
-      }
-
-      // Store the initialized FixedArray into the properties field of
-      // the JSObject
-      // r4: constructor function
-      // r7: JSObject
-      // r8: FixedArray (not tagged)
-      __ addi(r8, r8, Operand(kHeapObjectTag));  // Add the heap tag.
-      __ StoreP(r8, FieldMemOperand(r7, JSObject::kPropertiesOffset), r0);
-
       // Continue with JSObject being successfully allocated
-      // r4: constructor function
       // r7: JSObject
       __ b(&allocated);
 
-      // Undo the setting of the new top so that the heap is verifiable. For
-      // example, the map's unused properties potentially do not match the
-      // allocated objects unused properties.
-      // r7: JSObject (previous new top)
-      __ bind(&undo_allocation);
-      __ UndoAllocationInNewSpace(r7, r8);
+      // Reload the original constructor and fall-through.
+      __ bind(&rt_call_reload_new_target);
+      __ LoadP(r6, MemOperand(sp, 0 * kPointerSize));
     }
 
     // Allocate the new receiver object using the runtime call.
     // r4: constructor function
+    // r6: original constructor
     __ bind(&rt_call);
-    Generate_Runtime_NewObject(masm, create_memento, r4, &count_incremented,
-                               &allocated);
+    if (create_memento) {
+      // Get the cell or allocation site.
+      __ LoadP(r5, MemOperand(sp, 3 * kPointerSize));
+      __ Push(r5, r4, r6);
+      __ CallRuntime(Runtime::kNewObjectWithAllocationSite, 3);
+    } else {
+      __ Push(r4, r6);
+      __ CallRuntime(Runtime::kNewObject, 2);
+    }
+    __ mr(r7, r3);
+
+    // Runtime_NewObjectWithAllocationSite increments allocation count.
+    // Skip the increment.
+    Label count_incremented;
+    if (create_memento) {
+      __ b(&count_incremented);
+    }
 
     // Receiver for constructor call allocated.
     // r7: JSObject
     __ bind(&allocated);
 
     if (create_memento) {
-      __ LoadP(r5, MemOperand(sp, kPointerSize * 2));
+      __ LoadP(r5, MemOperand(sp, 3 * kPointerSize));
       __ LoadRoot(r8, Heap::kUndefinedValueRootIndex);
       __ cmp(r5, r8);
       __ beq(&count_incremented);
@@ -626,40 +531,37 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       __ bind(&count_incremented);
     }
 
-    __ Push(r7, r7);
+    // Restore the parameters.
+    __ Pop(r4, ip);
 
-    // Reload the number of arguments and the constructor from the stack.
-    // sp[0]: receiver
-    // sp[1]: receiver
-    // sp[2]: constructor function
-    // sp[3]: number of arguments (smi-tagged)
-    __ LoadP(r4, MemOperand(sp, 2 * kPointerSize));
-    __ LoadP(r6, MemOperand(sp, 3 * kPointerSize));
+    // Retrieve smi-tagged arguments count from the stack.
+    __ LoadP(r6, MemOperand(sp));
+
+    // Push new.target onto the construct frame. This is stored just below the
+    // receiver on the stack.
+    __ Push(ip, r7, r7);
 
     // Set up pointer to last argument.
     __ addi(r5, fp, Operand(StandardFrameConstants::kCallerSPOffset));
 
-    // Set up number of arguments for function call below
-    __ SmiUntag(r3, r6);
-
     // Copy arguments and receiver to the expression stack.
-    // r3: number of arguments
     // r4: constructor function
     // r5: address of last argument (caller sp)
     // r6: number of arguments (smi-tagged)
     // sp[0]: receiver
     // sp[1]: receiver
-    // sp[2]: constructor function
+    // sp[2]: new.target
     // sp[3]: number of arguments (smi-tagged)
     Label loop, no_args;
-    __ cmpi(r3, Operand::Zero());
-    __ beq(&no_args);
+    __ SmiUntag(r3, r6, SetRC);
+    __ beq(&no_args, cr0);
     __ ShiftLeftImm(ip, r3, Operand(kPointerSizeLog2));
+    __ sub(sp, sp, ip);
     __ mtctr(r3);
     __ bind(&loop);
     __ subi(ip, ip, Operand(kPointerSize));
     __ LoadPX(r0, MemOperand(r5, ip));
-    __ push(r0);
+    __ StorePX(r0, MemOperand(sp, ip));
     __ bdnz(&loop);
     __ bind(&no_args);
 
@@ -683,7 +585,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     // Restore context from the frame.
     // r3: result
     // sp[0]: receiver
-    // sp[1]: constructor function
+    // sp[1]: new.target
     // sp[2]: number of arguments (smi-tagged)
     __ LoadP(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
 
@@ -694,8 +596,8 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
 
     // If the result is a smi, it is *not* an object in the ECMA sense.
     // r3: result
-    // sp[0]: receiver (newly allocated object)
-    // sp[1]: constructor function
+    // sp[0]: receiver
+    // sp[1]: new.target
     // sp[2]: number of arguments (smi-tagged)
     __ JumpIfSmi(r3, &use_receiver);
 
@@ -714,7 +616,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     __ bind(&exit);
     // r3: result
     // sp[0]: receiver (newly allocated object)
-    // sp[1]: constructor function
+    // sp[1]: new.target (original constructor)
     // sp[2]: number of arguments (smi-tagged)
     __ LoadP(r4, MemOperand(sp, 2 * kPointerSize));
 
@@ -749,11 +651,10 @@ void Builtins::Generate_JSConstructStubForDerived(MacroAssembler* masm) {
   //  -- sp[...]: constructor arguments
   // -----------------------------------
 
-  // TODO(dslomov): support pretenuring
-  CHECK(!FLAG_pretenuring_call_new);
-
   {
-    FrameScope scope(masm, StackFrame::CONSTRUCT);
+    FrameAndConstantPoolScope scope(masm, StackFrame::CONSTRUCT);
+
+    __ AssertUndefinedOrAllocationSite(r5, r7);
 
     // Smi-tagged arguments count.
     __ mr(r7, r3);
@@ -762,8 +663,8 @@ void Builtins::Generate_JSConstructStubForDerived(MacroAssembler* masm) {
     // receiver is the hole.
     __ LoadRoot(ip, Heap::kTheHoleValueRootIndex);
 
-    // smi arguments count, new.target, receiver
-    __ Push(r7, r6, ip);
+    // allocation site, smi arguments count, new.target, receiver
+    __ Push(r5, r7, r6, ip);
 
     // Set up pointer to last argument.
     __ addi(r5, fp, Operand(StandardFrameConstants::kCallerSPOffset));
@@ -787,8 +688,6 @@ void Builtins::Generate_JSConstructStubForDerived(MacroAssembler* masm) {
     __ push(r0);
     __ bdnz(&loop);
     __ bind(&no_args);
-
-    __ addi(r3, r3, Operand(1));
 
     // Handle step in.
     Label skip_step_in;
@@ -815,7 +714,8 @@ void Builtins::Generate_JSConstructStubForDerived(MacroAssembler* masm) {
     // r3: result
     // sp[0]: number of arguments (smi-tagged)
     __ LoadP(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
-    __ LoadP(r4, MemOperand(sp, 0));
+    // Get arguments count, skipping over new.target.
+    __ LoadP(r4, MemOperand(sp, kPointerSize));
 
     // Leave construct frame.
   }
@@ -962,7 +862,7 @@ void Builtins::Generate_CompileLazy(MacroAssembler* masm) {
 
 
 static void CallCompileOptimized(MacroAssembler* masm, bool concurrent) {
-  FrameScope scope(masm, StackFrame::INTERNAL);
+  FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
   // Push a copy of the function onto the stack.
   // Push function as parameter to the runtime call.
   __ Push(r4, r4);
@@ -1080,7 +980,7 @@ void Builtins::Generate_MarkCodeAsToBeExecutedOnce(MacroAssembler* masm) {
 static void Generate_NotifyStubFailureHelper(MacroAssembler* masm,
                                              SaveFPRegsMode save_doubles) {
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
 
     // Preserve registers across notification, this is important for compiled
     // stubs that tail call the runtime on deopts passing their parameters in
@@ -1109,7 +1009,7 @@ void Builtins::Generate_NotifyStubFailureSaveDoubles(MacroAssembler* masm) {
 static void Generate_NotifyDeoptimizedHelper(MacroAssembler* masm,
                                              Deoptimizer::BailoutType type) {
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
     // Pass the function and deoptimization type to the runtime system.
     __ LoadSmiLiteral(r3, Smi::FromInt(static_cast<int>(type)));
     __ push(r3);
@@ -1157,7 +1057,7 @@ void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
   // Lookup the function in the JavaScript frame.
   __ LoadP(r3, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
     // Pass function as argument.
     __ push(r3);
     __ CallRuntime(Runtime::kCompileForOnStackReplacement, 1);
@@ -1176,7 +1076,12 @@ void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
   __ LoadP(r4, FieldMemOperand(r3, Code::kDeoptimizationDataOffset));
 
   {
+    ConstantPoolUnavailableScope constant_pool_unavailable(masm);
     __ addi(r3, r3, Operand(Code::kHeaderSize - kHeapObjectTag));  // Code start
+
+    if (FLAG_enable_embedded_constant_pool) {
+      __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3);
+    }
 
     // Load the OSR entrypoint offset from the deoptimization data.
     // <osr_offset> = <deopt_data>[#header_size + #osr_pc_offset]
@@ -1202,7 +1107,7 @@ void Builtins::Generate_OsrAfterStackCheck(MacroAssembler* masm) {
   __ cmpl(sp, ip);
   __ bge(&ok);
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
     __ CallRuntime(Runtime::kStackGuard, 0);
   }
   __ Jump(masm->isolate()->builtins()->OnStackReplacement(),
@@ -1293,7 +1198,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
 
     {
       // Enter an internal frame in order to preserve argument count.
-      FrameScope scope(masm, StackFrame::INTERNAL);
+      FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
       __ SmiTag(r3);
       __ Push(r3, r5);
       __ InvokeBuiltin(Builtins::TO_OBJECT, CALL_FUNCTION);
@@ -1397,7 +1302,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
 
   // 5b. Get the code to call from the function and check that the number of
   //     expected arguments matches what we're providing.  If so, jump
-  //     (tail-call) to the code in register edx without checking arguments.
+  //     (tail-call) to the code in register ip without checking arguments.
   // r3: actual number of arguments
   // r4: function
   __ LoadP(r6, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
@@ -1422,6 +1327,8 @@ static void Generate_PushAppliedArguments(MacroAssembler* masm,
                                           const int limitOffset) {
   Register receiver = LoadDescriptor::ReceiverRegister();
   Register key = LoadDescriptor::NameRegister();
+  Register slot = LoadDescriptor::SlotRegister();
+  Register vector = LoadWithVectorDescriptor::VectorRegister();
 
   // Copy all arguments from the array to the stack.
   Label entry, loop;
@@ -1431,7 +1338,14 @@ static void Generate_PushAppliedArguments(MacroAssembler* masm,
   __ LoadP(receiver, MemOperand(fp, argumentsOffset));
 
   // Use inline caching to speed up access to arguments.
-  Handle<Code> ic = masm->isolate()->builtins()->KeyedLoadIC_Megamorphic();
+  FeedbackVectorSpec spec(0, Code::KEYED_LOAD_IC);
+  Handle<TypeFeedbackVector> feedback_vector =
+      masm->isolate()->factory()->NewTypeFeedbackVector(&spec);
+  int index = feedback_vector->GetIndex(FeedbackVectorICSlot(0));
+  __ LoadSmiLiteral(slot, Smi::FromInt(index));
+  __ Move(vector, feedback_vector);
+  Handle<Code> ic =
+      KeyedLoadICStub(masm->isolate(), LoadICState(kNoExtraICState)).GetCode();
   __ Call(ic, RelocInfo::CODE_TARGET);
 
   // Push the nth argument.
@@ -1460,7 +1374,7 @@ static void Generate_ApplyHelper(MacroAssembler* masm, bool targetIsArgument) {
   const int kStackSize = kFormalParameters + 1;
 
   {
-    FrameScope frame_scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope frame_scope(masm, StackFrame::INTERNAL);
     const int kArgumentsOffset = kFPOnStackSize + kPCOnStackSize;
     const int kReceiverOffset = kArgumentsOffset + kPointerSize;
     const int kFunctionOffset = kReceiverOffset + kPointerSize;
@@ -1589,7 +1503,7 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
   const int kStackSize = kFormalParameters + 1;
 
   {
-    FrameScope frame_scope(masm, StackFrame::INTERNAL);
+    FrameAndConstantPoolScope frame_scope(masm, StackFrame::INTERNAL);
     const int kNewTargetOffset = kFPOnStackSize + kPCOnStackSize;
     const int kArgumentsOffset = kNewTargetOffset + kPointerSize;
     const int kFunctionOffset = kArgumentsOffset + kPointerSize;
@@ -1621,9 +1535,7 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
         StandardFrameConstants::kExpressionsOffset - (1 * kPointerSize);
     __ li(r4, Operand::Zero());
     __ Push(r3, r4);  // limit and initial index.
-    // Push newTarget and callee functions
-    __ LoadP(r3, MemOperand(fp, kNewTargetOffset));
-    __ push(r3);
+    // Push the constructor function as callee
     __ LoadP(r3, MemOperand(fp, kFunctionOffset));
     __ push(r3);
 
@@ -1634,12 +1546,11 @@ static void Generate_ConstructHelper(MacroAssembler* masm) {
     // Use undefined feedback vector
     __ LoadRoot(r5, Heap::kUndefinedValueRootIndex);
     __ LoadP(r4, MemOperand(fp, kFunctionOffset));
+    __ LoadP(r7, MemOperand(fp, kNewTargetOffset));
 
     // Call the function.
     CallConstructStub stub(masm->isolate(), SUPER_CONSTRUCTOR_CALL);
     __ Call(stub.GetCode(), RelocInfo::CONSTRUCT_CALL);
-
-    __ Drop(1);
 
     // Leave internal frame.
   }
@@ -1689,7 +1600,11 @@ static void EnterArgumentsAdaptorFrame(MacroAssembler* masm) {
   __ LoadSmiLiteral(r7, Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR));
   __ mflr(r0);
   __ push(r0);
-  __ Push(fp, r7, r4, r3);
+  if (FLAG_enable_embedded_constant_pool) {
+    __ Push(fp, kConstantPoolRegister, r7, r4, r3);
+  } else {
+    __ Push(fp, r7, r4, r3);
+  }
   __ addi(fp, sp, Operand(StandardFrameConstants::kFixedFrameSizeFromFp +
                           kPointerSize));
 }
@@ -1765,17 +1680,28 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
     __ bind(&too_few);
 
     // If the function is strong we need to throw an error.
-    Label weak_function;
+    Label no_strong_error;
     __ LoadP(r7, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
-    __ lwz(r7, FieldMemOperand(r7, SharedFunctionInfo::kCompilerHintsOffset));
-    __ TestBit(r7,
+    __ lwz(r8, FieldMemOperand(r7, SharedFunctionInfo::kCompilerHintsOffset));
+    __ TestBit(r8,
 #if V8_TARGET_ARCH_PPC64
                SharedFunctionInfo::kStrongModeFunction,
 #else
                SharedFunctionInfo::kStrongModeFunction + kSmiTagSize,
 #endif
                r0);
-    __ beq(&weak_function, cr0);
+    __ beq(&no_strong_error, cr0);
+
+    // What we really care about is the required number of arguments.
+    __ lwz(r7, FieldMemOperand(r7, SharedFunctionInfo::kLengthOffset));
+#if V8_TARGET_ARCH_PPC64
+    // See commment near kLenghtOffset in src/objects.h
+    __ srawi(r7, r7, kSmiTagSize);
+#else
+    __ SmiUntag(r7);
+#endif
+    __ cmp(r3, r7);
+    __ bge(&no_strong_error);
 
     {
       FrameScope frame(masm, StackFrame::MANUAL);
@@ -1783,7 +1709,7 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
       __ CallRuntime(Runtime::kThrowStrongModeTooFewArguments, 0);
     }
 
-    __ bind(&weak_function);
+    __ bind(&no_strong_error);
     EnterArgumentsAdaptorFrame(masm);
 
     // Calculate copy start address into r0 and copy end address is fp.
@@ -1855,7 +1781,7 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
 
 
 #undef __
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_TARGET_ARCH_PPC

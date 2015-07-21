@@ -34,6 +34,7 @@
 #include "test/cctest/cctest.h"
 
 
+using ::v8::base::SmartArrayPointer;
 using ::v8::internal::CStrVector;
 using ::v8::internal::Factory;
 using ::v8::internal::Handle;
@@ -43,7 +44,6 @@ using ::v8::internal::JSFunction;
 using ::v8::internal::Object;
 using ::v8::internal::Runtime;
 using ::v8::internal::Script;
-using ::v8::internal::SmartArrayPointer;
 using ::v8::internal::SharedFunctionInfo;
 using ::v8::internal::String;
 using ::v8::internal::Vector;
@@ -80,7 +80,6 @@ static void CheckFunctionName(v8::Handle<v8::Script> script,
   CHECK_NE(0, func_pos);
 
   // Obtain SharedFunctionInfo for the function.
-  isolate->debug()->PrepareForBreakPoints();
   Handle<SharedFunctionInfo> shared_func_info =
       Handle<SharedFunctionInfo>::cast(
           isolate->debug()->FindSharedFunctionInfoInScript(i_script, func_pos));

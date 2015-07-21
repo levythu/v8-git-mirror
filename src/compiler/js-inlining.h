@@ -13,11 +13,10 @@ namespace internal {
 namespace compiler {
 
 class JSCallFunctionAccessor;
-struct Inlinee;
 
 class JSInliner final : public AdvancedReducer {
  public:
-  enum Mode { kBuiltinsInlining, kGeneralInlining };
+  enum Mode { kRestrictedInlining, kGeneralInlining };
 
   JSInliner(Editor* editor, Mode mode, Zone* local_zone, CompilationInfo* info,
             JSGraph* jsgraph)
@@ -36,11 +35,11 @@ class JSInliner final : public AdvancedReducer {
   JSGraph* jsgraph_;
 
   Node* CreateArgumentsAdaptorFrameState(JSCallFunctionAccessor* call,
-                                         Handle<JSFunction> jsfunction,
+                                         Handle<SharedFunctionInfo> shared_info,
                                          Zone* temp_zone);
-  void AddClosureToFrameState(Node* frame_state, Handle<JSFunction> jsfunction);
 
-  Reduction InlineCall(Node* call, Inlinee& inlinee);
+  Reduction InlineCall(Node* call, Node* context, Node* frame_state,
+                       Node* start, Node* end);
 };
 
 }  // namespace compiler

@@ -49,11 +49,11 @@ var SHR_STRONG;
 var DELETE;
 var IN;
 var INSTANCE_OF;
-var FILTER_KEY;
 var CALL_NON_FUNCTION;
 var CALL_NON_FUNCTION_AS_CONSTRUCTOR;
 var CALL_FUNCTION_PROXY;
 var CALL_FUNCTION_PROXY_AS_CONSTRUCTOR;
+var CONCAT_ITERABLE_TO_ARRAY;
 var APPLY_PREPARE;
 var REFLECT_APPLY_PREPARE;
 var REFLECT_CONSTRUCT_PREPARE;
@@ -62,9 +62,6 @@ var TO_OBJECT;
 var TO_NUMBER;
 var TO_STRING;
 var TO_NAME;
-
-var StringLengthTF_STUB;
-var MathFloor_STUB;
 
 var $defaultNumber;
 var $defaultString;
@@ -85,7 +82,7 @@ var $toPrimitive;
 var $toString;
 var $toUint32;
 
-(function(global, shared, exports) {
+(function(global, utils) {
 
 %CheckIsBootstrapping();
 
@@ -106,7 +103,7 @@ EQUALS = function EQUALS(y) {
       while (true) {
         if (IS_NUMBER(y)) return %NumberEquals(x, y);
         if (IS_NULL_OR_UNDEFINED(y)) return 1;  // not equal
-        if (IS_SYMBOL(y)) return 1;  // not equal
+        if (IS_SYMBOL(y) || IS_FLOAT32X4(y)) return 1;  // not equal
         if (!IS_SPEC_OBJECT(y)) {
           // String or boolean.
           return %NumberEquals(x, %$toNumber(y));
@@ -116,7 +113,7 @@ EQUALS = function EQUALS(y) {
     } else if (IS_STRING(x)) {
       while (true) {
         if (IS_STRING(y)) return %StringEquals(x, y);
-        if (IS_SYMBOL(y)) return 1;  // not equal
+        if (IS_SYMBOL(y) || IS_FLOAT32X4(y)) return 1;  // not equal
         if (IS_NUMBER(y)) return %NumberEquals(%$toNumber(x), y);
         if (IS_BOOLEAN(y)) return %NumberEquals(%$toNumber(x), %$toNumber(y));
         if (IS_NULL_OR_UNDEFINED(y)) return 1;  // not equal
@@ -130,19 +127,23 @@ EQUALS = function EQUALS(y) {
       if (IS_NULL_OR_UNDEFINED(y)) return 1;
       if (IS_NUMBER(y)) return %NumberEquals(%$toNumber(x), y);
       if (IS_STRING(y)) return %NumberEquals(%$toNumber(x), %$toNumber(y));
-      if (IS_SYMBOL(y)) return 1;  // not equal
+      if (IS_SYMBOL(y) || IS_FLOAT32X4(y)) return 1;  // not equal
       // y is object.
       x = %$toNumber(x);
       y = %$toPrimitive(y, NO_HINT);
     } else if (IS_NULL_OR_UNDEFINED(x)) {
       return IS_NULL_OR_UNDEFINED(y) ? 0 : 1;
+    } else if (IS_FLOAT32X4(x)) {
+      if (IS_FLOAT32X4(y))
+        return %Float32x4Equals(x, y);
+      return 1;  // not equal
     } else {
       // x is an object.
       if (IS_SPEC_OBJECT(y)) {
         return %_ObjectEquals(x, y) ? 0 : 1;
       }
       if (IS_NULL_OR_UNDEFINED(y)) return 1;  // not equal
-      if (IS_SYMBOL(y)) return 1;  // not equal
+      if (IS_SYMBOL(y) || IS_FLOAT32X4(y)) return 1;  // not equal
       if (IS_BOOLEAN(y)) y = %$toNumber(y);
       x = %$toPrimitive(x, NO_HINT);
     }
@@ -160,6 +161,9 @@ STRICT_EQUALS = function STRICT_EQUALS(x) {
     if (!IS_NUMBER(x)) return 1;  // not equal
     return %NumberEquals(this, x);
   }
+
+  if (IS_FLOAT32X4(this) && IS_FLOAT32X4(x))
+    return %Float32x4Equals(this, x);
 
   // If anything else gets here, we just do simple identity check.
   // Objects (including functions), null, undefined and booleans were
@@ -210,7 +214,7 @@ COMPARE_STRONG = function COMPARE_STRONG(x, ncr) {
   if (IS_STRING(this) && IS_STRING(x)) return %_StringCompare(this, x);
   if (IS_NUMBER(this) && IS_NUMBER(x)) return %NumberCompare(this, x, ncr);
 
-  throw %MakeTypeError('strong_implicit_cast');
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -245,7 +249,7 @@ ADD_STRONG = function ADD_STRONG(x) {
   if (IS_NUMBER(this) && IS_NUMBER(x)) return %NumberAdd(this, x);
   if (IS_STRING(this) && IS_STRING(x)) return %_StringAdd(this, x);
 
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -269,7 +273,7 @@ STRING_ADD_LEFT_STRONG = function STRING_ADD_LEFT_STRONG(y) {
   if (IS_STRING(y)) {
     return %_StringAdd(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -294,7 +298,7 @@ STRING_ADD_RIGHT_STRONG = function STRING_ADD_RIGHT_STRONG(y) {
   if (IS_STRING(this)) {
     return %_StringAdd(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -311,7 +315,7 @@ SUB_STRONG = function SUB_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberSub(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -328,7 +332,7 @@ MUL_STRONG = function MUL_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberMul(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -345,7 +349,7 @@ DIV_STRONG = function DIV_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberDiv(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -362,7 +366,7 @@ MOD_STRONG = function MOD_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberMod(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -384,7 +388,7 @@ BIT_OR_STRONG = function BIT_OR_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberOr(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -415,7 +419,7 @@ BIT_AND_STRONG = function BIT_AND_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberAnd(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -432,7 +436,7 @@ BIT_XOR_STRONG = function BIT_XOR_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberXor(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -449,7 +453,7 @@ SHL_STRONG = function SHL_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberShl(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -480,7 +484,7 @@ SAR_STRONG = function SAR_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberSar(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -497,7 +501,7 @@ SHR_STRONG = function SHR_STRONG(y) {
   if (IS_NUMBER(this) && IS_NUMBER(y)) {
     return %NumberShr(this, y);
   }
-  throw %MakeTypeError(kStrongImplicitCast);
+  throw %MakeTypeError(kStrongImplicitConversion);
 }
 
 
@@ -508,7 +512,7 @@ SHR_STRONG = function SHR_STRONG(y) {
 
 // ECMA-262, section 11.4.1, page 46.
 DELETE = function DELETE(key, language_mode) {
-  return %DeleteProperty(%$toObject(this), %$toName(key), language_mode);
+  return %DeleteProperty(%$toObject(this), key, language_mode);
 }
 
 
@@ -556,16 +560,6 @@ INSTANCE_OF = function INSTANCE_OF(F) {
 
   // Return whether or not O is in the prototype chain of V.
   return %IsInPrototypeChain(O, V) ? 0 : 1;
-}
-
-
-// Filter a given key against an object by checking if the object
-// has a property with the given key; return the key as a string if
-// it has. Otherwise returns 0 (smi). Used in for-in statements.
-FILTER_KEY = function FILTER_KEY(key) {
-  var string = %$toName(key);
-  if (%HasProperty(this, string)) return string;
-  return 0;
 }
 
 
@@ -726,6 +720,11 @@ REFLECT_CONSTRUCT_PREPARE = function REFLECT_CONSTRUCT_PREPARE(
 }
 
 
+CONCAT_ITERABLE_TO_ARRAY = function CONCAT_ITERABLE_TO_ARRAY(iterable) {
+  return %$concatIterableToArray(this, iterable);
+};
+
+
 STACK_OVERFLOW = function STACK_OVERFLOW(length) {
   throw %MakeRangeError(kStackOverflow);
 }
@@ -755,37 +754,6 @@ TO_NAME = function TO_NAME() {
 }
 
 
-/* -----------------------------------------------
-   - - -   J a v a S c r i p t   S t u b s   - - -
-   -----------------------------------------------
-*/
-
-StringLengthTF_STUB = function StringLengthTF_STUB(receiver, name) {
-  return %_StringGetLength(%_JSValueGetValue(receiver));
-}
-
-MathFloor_STUB = function MathFloor_STUB(f, i, v) {
-  // |f| is calling function's JSFunction
-  // |i| is TypeFeedbackVector slot # of callee's CallIC for Math.floor call
-  // |v| is the value to floor
-  var r = %_MathFloor(+v);
-  if (%_IsMinusZero(r)) {
-    // Collect type feedback when the result of the floor is -0. This is
-    // accomplished by storing a sentinel in the second, "extra"
-    // TypeFeedbackVector slot corresponding to the Math.floor CallIC call in
-    // the caller's TypeVector.
-    %_FixedArraySet(%_GetTypeFeedbackVector(f), ((i|0)+1)|0, 1);
-    return -0;
-  }
-  // Return integers in smi range as smis.
-  var trunc = r|0;
-  if (trunc === r) {
-    return trunc;
-  }
-  return r;
-}
-
-
 /* -------------------------------------
    - - -   C o n v e r s i o n s   - - -
    -------------------------------------
@@ -799,6 +767,7 @@ function ToPrimitive(x, hint) {
   // Normal behavior.
   if (!IS_SPEC_OBJECT(x)) return x;
   if (IS_SYMBOL_WRAPPER(x)) throw MakeTypeError(kSymbolToPrimitive);
+  if (IS_FLOAT32X4(x)) return x;
   if (hint == NO_HINT) hint = (IS_DATE(x)) ? STRING_HINT : NUMBER_HINT;
   return (hint == NUMBER_HINT) ? DefaultNumber(x) : DefaultString(x);
 }
@@ -824,6 +793,7 @@ function ToNumber(x) {
   if (IS_BOOLEAN(x)) return x ? 1 : 0;
   if (IS_UNDEFINED(x)) return NAN;
   if (IS_SYMBOL(x)) throw MakeTypeError(kSymbolToNumber);
+  if (IS_FLOAT32X4(x)) throw MakeTypeError(kSimdToNumber);
   return (IS_NULL(x)) ? 0 : ToNumber(DefaultNumber(x));
 }
 
@@ -835,6 +805,7 @@ function NonNumberToNumber(x) {
   if (IS_BOOLEAN(x)) return x ? 1 : 0;
   if (IS_UNDEFINED(x)) return NAN;
   if (IS_SYMBOL(x)) throw MakeTypeError(kSymbolToNumber);
+  if (IS_FLOAT32X4(x)) throw MakeTypeError(kSimdToNumber);
   return (IS_NULL(x)) ? 0 : ToNumber(DefaultNumber(x));
 }
 
@@ -870,6 +841,7 @@ function ToObject(x) {
   if (IS_NUMBER(x)) return new GlobalNumber(x);
   if (IS_BOOLEAN(x)) return new GlobalBoolean(x);
   if (IS_SYMBOL(x)) return %NewSymbolWrapper(x);
+  if (IS_FLOAT32X4(x)) return %NewFloat32x4Wrapper(x);
   if (IS_NULL_OR_UNDEFINED(x) && !IS_UNDETECTABLE(x)) {
     throw MakeTypeError(kUndefinedOrNullToObject);
   }
@@ -917,6 +889,9 @@ function SameValue(x, y) {
       return false;
     }
   }
+  if (IS_FLOAT32X4(x)) {
+    return %Float32x4SameValue(x, y);
+  }
   return x === y;
 }
 
@@ -927,7 +902,19 @@ function SameValueZero(x, y) {
   if (IS_NUMBER(x)) {
     if (NUMBER_IS_NAN(x) && NUMBER_IS_NAN(y)) return true;
   }
+  if (IS_FLOAT32X4(x)) {
+    return %Float32x4SameValueZero(x, y);
+  }
   return x === y;
+}
+
+
+function ConcatIterableToArray(target, iterable) {
+   var index = target.length;
+   for (var element of iterable) {
+     %AddElement(target, index++, element);
+   }
+   return target;
 }
 
 
@@ -957,7 +944,7 @@ function IsConcatSpreadable(O) {
 
 // ECMA-262, section 8.6.2.6, page 28.
 function DefaultNumber(x) {
-  if (!IS_SYMBOL_WRAPPER(x)) {
+  if (!IS_SYMBOL_WRAPPER(x) && !IS_FLOAT32X4_WRAPPER(x)) {
     var valueOf = x.valueOf;
     if (IS_SPEC_FUNCTION(valueOf)) {
       var v = %_CallFunction(x, valueOf);
@@ -1008,6 +995,7 @@ function ToPositiveInteger(x, rangeErrorIndex) {
 
 //----------------------------------------------------------------------------
 
+$concatIterableToArray = ConcatIterableToArray;
 $defaultNumber = DefaultNumber;
 $defaultString = DefaultString;
 $NaN = %GetRootNaN();

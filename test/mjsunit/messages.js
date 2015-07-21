@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Flags: --stack-size=100 --harmony --harmony-reflect --harmony-arrays
-// Flags: --harmony-regexps --strong-mode
+// Flags: --harmony-regexps --harmony-simd --strong-mode
 
 function test(f, expected, type) {
   try {
@@ -323,6 +323,11 @@ test(function() {
   1 + Symbol();
 }, "Cannot convert a Symbol value to a number", TypeError);
 
+// kSimdToNumber
+test(function() {
+  1 + SIMD.float32x4(1, 2, 3, 4);
+}, "Cannot convert a SIMD value to a number", TypeError);
+
 // kUndefinedOrNullToObject
 test(function() {
   Array.prototype.toString.call(null);
@@ -353,15 +358,47 @@ test(function() {
 }, "Reflect.construct: Arguments list has wrong type", TypeError);
 
 
-//=== SyntaxError ===
+// === SyntaxError ===
 
+// kInvalidRegExpFlags
+test(function() {
+  /a/x.test("a");
+}, "Invalid flags supplied to RegExp constructor 'x'", SyntaxError);
+
+// kMalformedRegExp
+test(function() {
+  /(/.test("a");
+}, "Invalid regular expression: /(/: Unterminated group", SyntaxError);
+
+// kParenthesisInArgString
 test(function() {
   new Function(")", "");
 }, "Function arg string contains parenthesis", SyntaxError);
 
+// kUnexpectedEOS
+test(function() {
+  JSON.parse("{")
+}, "Unexpected end of input", SyntaxError);
+
+// kUnexpectedToken
+test(function() {
+  JSON.parse("/")
+}, "Unexpected token /", SyntaxError);
+
+// kUnexpectedTokenNumber
+test(function() {
+  JSON.parse("{ 1")
+}, "Unexpected number", SyntaxError);
+
+// kUnexpectedTokenString
+test(function() {
+  JSON.parse('"""')
+}, "Unexpected string", SyntaxError);
+
 
 // === ReferenceError ===
 
+// kNotDefined
 test(function() {
   "use strict";
   o;
@@ -373,7 +410,7 @@ test(function() {
 test(function() {
   "use strict";
   Object.defineProperty([], "length", { value: 1E100 });
-}, "defineProperty() array length out of range", RangeError);
+}, "Invalid array length", RangeError);
 
 // kInvalidArrayBufferLength
 test(function() {

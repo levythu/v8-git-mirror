@@ -22,6 +22,10 @@
       'include_dirs': [
         '../..',
       ],
+      'defines': [
+        # TODO(jochen): Remove again after this is globally turned on.
+        'V8_IMMINENT_DEPRECATION_WARNINGS',
+      ],
       'sources': [  ### gcmole(all) ###
         'base/bits-unittest.cc',
         'base/cpu-unittest.cc',
@@ -44,10 +48,11 @@
         'compiler/compiler-test-utils.h',
         'compiler/control-equivalence-unittest.cc',
         'compiler/control-flow-optimizer-unittest.cc',
-        'compiler/control-reducer-unittest.cc',
+        'compiler/dead-code-elimination-unittest.cc',
         'compiler/diamond-unittest.cc',
         'compiler/graph-reducer-unittest.cc',
         'compiler/graph-reducer-unittest.h',
+        'compiler/graph-trimmer-unittest.cc',
         'compiler/graph-unittest.cc',
         'compiler/graph-unittest.h',
         'compiler/instruction-selector-unittest.cc',
@@ -55,6 +60,7 @@
         'compiler/instruction-sequence-unittest.cc',
         'compiler/instruction-sequence-unittest.h',
         'compiler/js-builtin-reducer-unittest.cc',
+        'compiler/js-context-relaxation-unittest.cc',
         'compiler/js-intrinsic-lowering-unittest.cc',
         'compiler/js-operator-unittest.cc',
         'compiler/js-typed-lowering-unittest.cc',
@@ -88,6 +94,8 @@
         'libplatform/task-queue-unittest.cc',
         'libplatform/worker-thread-unittest.cc',
         'heap/gc-idle-time-handler-unittest.cc',
+        'heap/memory-reducer-unittest.cc',
+        'heap/heap-unittest.cc',
         'run-all-unittests.cc',
         'test-utils.h',
         'test-utils.cc',

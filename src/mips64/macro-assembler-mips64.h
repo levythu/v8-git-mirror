@@ -530,13 +530,6 @@ class MacroAssembler: public Assembler {
                 Label* gc_required,
                 AllocationFlags flags);
 
-  // Undo allocation in new space. The object passed and objects allocated after
-  // it will no longer be allocated. The caller must make sure that no pointers
-  // are left to the object(s) no longer allocated as they would be invalid when
-  // allocation is undone.
-  void UndoAllocationInNewSpace(Register object, Register scratch);
-
-
   void AllocateTwoByteString(Register result,
                              Register length,
                              Register scratch1,
@@ -1203,7 +1196,7 @@ class MacroAssembler: public Assembler {
 
   void AdduAndCheckForOverflow(Register dst, Register left,
                                const Operand& right, Register overflow_dst,
-                               Register scratch = at);
+                               Register scratch);
 
   void SubuAndCheckForOverflow(Register dst,
                                Register left,
@@ -1213,7 +1206,21 @@ class MacroAssembler: public Assembler {
 
   void SubuAndCheckForOverflow(Register dst, Register left,
                                const Operand& right, Register overflow_dst,
-                               Register scratch = at);
+                               Register scratch);
+
+  void DadduAndCheckForOverflow(Register dst, Register left, Register right,
+                                Register overflow_dst, Register scratch = at);
+
+  void DadduAndCheckForOverflow(Register dst, Register left,
+                                const Operand& right, Register overflow_dst,
+                                Register scratch);
+
+  void DsubuAndCheckForOverflow(Register dst, Register left, Register right,
+                                Register overflow_dst, Register scratch = at);
+
+  void DsubuAndCheckForOverflow(Register dst, Register left,
+                                const Operand& right, Register overflow_dst,
+                                Register scratch);
 
   void BranchOnOverflow(Label* label,
                         Register overflow_check,
@@ -1702,6 +1709,8 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
   void BranchAndLinkShort(Label* L, Condition cond, Register rs,
                           const Operand& rt,
                           BranchDelaySlot bdslot = PROTECT);
+  void J(Label* L, BranchDelaySlot bdslot);
+  void Jal(Label* L, BranchDelaySlot bdslot);
   void Jr(Label* L, BranchDelaySlot bdslot);
   void Jalr(Label* L, BranchDelaySlot bdslot);
 
@@ -1780,7 +1789,7 @@ class CodePatcher {
   CodePatcher(byte* address,
               int instructions,
               FlushICache flush_cache = FLUSH);
-  virtual ~CodePatcher();
+  ~CodePatcher();
 
   // Macro assembler to emit code.
   MacroAssembler* masm() { return &masm_; }

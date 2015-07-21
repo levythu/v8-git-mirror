@@ -63,6 +63,7 @@
   'ecma_3/Statements/regress-74474-002': [PASS, NO_VARIANTS],
   'ecma_3/Statements/regress-74474-003': [PASS, NO_VARIANTS],
   'js1_5/Regress/regress-111557': [PASS, NO_VARIANTS],
+  'js1_5/Regress/regress-155081': [PASS, NO_VARIANTS],
   'js1_5/Regress/regress-155081-2': [PASS, NO_VARIANTS],
   'js1_5/Regress/regress-451322': [PASS, NO_VARIANTS],
 
@@ -84,6 +85,8 @@
   'ecma/String/15.5.4.8-1': [FAIL],
   'ecma/String/15.5.4.9-1': [FAIL],
 
+  # ToLength, not ToUint32, is called on RegExps' lastIndex property
+  'ecma_3/RegExp/15.10.6.2-2': [FAIL],
 
   ##################### SKIPPED TESTS #####################
 

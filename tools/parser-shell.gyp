@@ -50,9 +50,15 @@
       'include_dirs+': [
         '..',
       ],
+      'defines': [
+        # TODO(jochen): Remove again after this is globally turned on.
+        'V8_IMMINENT_DEPRECATION_WARNINGS',
+      ],
       'sources': [
         'parser-shell.cc',
         'shell-utils.h',
+        '../src/startup-data-util.h',
+        '../src/startup-data-util.cc',
       ],
     },
   ],

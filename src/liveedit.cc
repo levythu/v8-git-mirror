@@ -28,7 +28,8 @@ void SetElementSloppy(Handle<JSObject> object,
   // Ignore return value from SetElement. It can only be a failure if there
   // are element setters causing exceptions and the debugger context has none
   // of these.
-  JSObject::SetElement(object, index, value, NONE, SLOPPY).Assert();
+  Object::SetElement(object->GetIsolate(), object, index, value, SLOPPY)
+      .Assert();
 }
 
 
@@ -764,7 +765,10 @@ class FunctionInfoListener {
       ZoneList<Variable*> stack_list(current_scope->StackLocalCount(), zone);
       ZoneList<Variable*> context_list(
           current_scope->ContextLocalCount(), zone);
-      current_scope->CollectStackAndContextLocals(&stack_list, &context_list);
+      ZoneList<Variable*> globals_list(current_scope->ContextGlobalCount(),
+                                       zone);
+      current_scope->CollectStackAndContextLocals(&stack_list, &context_list,
+                                                  &globals_list);
       context_list.Sort(&Variable::CompareIndex);
 
       for (int i = 0; i < context_list.length(); i++) {
@@ -844,7 +848,7 @@ MaybeHandle<JSArray> LiveEdit::GatherCompileInfo(Handle<Script> script,
   {
     // Creating verbose TryCatch from public API is currently the only way to
     // force code save location. We do not use this the object directly.
-    v8::TryCatch try_catch;
+    v8::TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
     try_catch.SetVerbose(true);
 
     // A logical 'try' section.
@@ -1089,38 +1093,6 @@ class LiteralFixer {
 };
 
 
-// Check whether the code is natural function code (not a lazy-compile stub
-// code).
-static bool IsJSFunctionCode(Code* code) {
-  return code->kind() == Code::FUNCTION;
-}
-
-
-// Returns true if an instance of candidate were inlined into function's code.
-static bool IsInlined(JSFunction* function, SharedFunctionInfo* candidate) {
-  DisallowHeapAllocation no_gc;
-
-  if (function->code()->kind() != Code::OPTIMIZED_FUNCTION) return false;
-
-  DeoptimizationInputData* data =
-      DeoptimizationInputData::cast(function->code()->deoptimization_data());
-
-  if (data == function->GetIsolate()->heap()->empty_fixed_array()) {
-    return false;
-  }
-
-  FixedArray* literals = data->LiteralArray();
-
-  int inlined_count = data->InlinedFunctionCount()->value();
-  for (int i = 0; i < inlined_count; ++i) {
-    JSFunction* inlined = JSFunction::cast(literals->get(i));
-    if (inlined->shared() == candidate) return true;
-  }
-
-  return false;
-}
-
-
 // Marks code that shares the same shared function info or has inlined
 // code that shares the same function info.
 class DependentFunctionMarker: public OptimizedFunctionVisitor {
@@ -1136,8 +1108,7 @@ class DependentFunctionMarker: public OptimizedFunctionVisitor {
   virtual void VisitFunction(JSFunction* function) {
     // It should be guaranteed by the iterator that everything is optimized.
     DCHECK(function->code()->kind() == Code::OPTIMIZED_FUNCTION);
-    if (shared_info_ == function->shared() ||
-        IsInlined(function, shared_info_)) {
+    if (function->Inlines(shared_info_)) {
       // Mark the code for deoptimization.
       function->code()->set_marked_for_deoptimization(true);
       found_ = true;
@@ -1169,7 +1140,7 @@ void LiveEdit::ReplaceFunctionCode(
 
   Handle<SharedFunctionInfo> shared_info = shared_info_wrapper.GetInfo();
 
-  if (IsJSFunctionCode(shared_info->code())) {
+  if (shared_info->code()->kind() == Code::FUNCTION) {
     Handle<Code> code = compile_info_wrapper.GetFunctionCode();
     ReplaceCodeObject(Handle<Code>(shared_info->code()), code);
     Handle<Object> code_scope_info = compile_info_wrapper.GetCodeScopeInfo();
@@ -1183,13 +1154,6 @@ void LiveEdit::ReplaceFunctionCode(
     if (!feedback_vector.is_null()) {
       shared_info->set_feedback_vector(*feedback_vector.ToHandleChecked());
     }
-  }
-
-  if (shared_info->debug_info()->IsDebugInfo()) {
-    Handle<DebugInfo> debug_info(DebugInfo::cast(shared_info->debug_info()));
-    Handle<Code> new_original_code =
-        isolate->factory()->CopyCode(compile_info_wrapper.GetFunctionCode());
-    debug_info->set_original_code(*new_original_code);
   }
 
   int start_position = compile_info_wrapper.GetStartPosition();
@@ -1221,7 +1185,7 @@ void LiveEdit::SetFunctionScript(Handle<JSValue> function_wrapper,
   Handle<SharedFunctionInfo> shared_info =
       UnwrapSharedFunctionInfoFromJSValue(function_wrapper);
   CHECK(script_handle->IsScript() || script_handle->IsUndefined());
-  shared_info->set_script(*script_handle);
+  SharedFunctionInfo::SetScript(shared_info, script_handle);
   shared_info->DisableOptimization(kLiveEdit);
 
   function_wrapper->GetIsolate()->compilation_cache()->Remove(shared_info);
@@ -1407,7 +1371,7 @@ void LiveEdit::PatchFunctionPositions(Handle<JSArray> shared_info_array,
   info->set_end_position(new_function_end);
   info->set_function_token_position(new_function_token_pos);
 
-  if (IsJSFunctionCode(info->code())) {
+  if (info->code()->kind() == Code::FUNCTION) {
     // Patch relocation info section of the code.
     Handle<Code> patched_code = PatchPositionsInCode(Handle<Code>(info->code()),
                                                      position_change_array);
@@ -1512,7 +1476,7 @@ static bool CheckActivation(Handle<JSArray> shared_info_array,
     Handle<SharedFunctionInfo> shared =
         UnwrapSharedFunctionInfoFromJSValue(jsvalue);
 
-    if (function->shared() == *shared || IsInlined(*function, *shared)) {
+    if (function->Inlines(*shared)) {
       SetElementSloppy(result, i, Handle<Smi>(Smi::FromInt(status), isolate));
       return true;
     }
@@ -2061,4 +2025,5 @@ bool LiveEditFunctionTracker::IsActive(Isolate* isolate) {
   return isolate->active_function_info_listener() != NULL;
 }
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

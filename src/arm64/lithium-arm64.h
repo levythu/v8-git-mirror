@@ -104,6 +104,7 @@ class LCodeGen;
   V(LoadFieldByIndex)                        \
   V(LoadFunctionPrototype)                   \
   V(LoadGlobalGeneric)                       \
+  V(LoadGlobalViaContext)                    \
   V(LoadKeyedExternal)                       \
   V(LoadKeyedFixed)                          \
   V(LoadKeyedFixedDouble)                    \
@@ -152,6 +153,7 @@ class LCodeGen;
   V(StoreCodeEntry)                          \
   V(StoreContextSlot)                        \
   V(StoreFrameContext)                       \
+  V(StoreGlobalViaContext)                   \
   V(StoreKeyedExternal)                      \
   V(StoreKeyedFixed)                         \
   V(StoreKeyedFixedDouble)                   \
@@ -165,7 +167,6 @@ class LCodeGen;
   V(SubI)                                    \
   V(SubS)                                    \
   V(TaggedToI)                               \
-  V(TailCallThroughMegamorphicCache)         \
   V(ThisFunction)                            \
   V(ToFastProperties)                        \
   V(TransitionElementsKind)                  \
@@ -316,26 +317,6 @@ class LTemplateInstruction : public LTemplateResultInstruction<R> {
 
   int TempCount() final { return T; }
   LOperand* TempAt(int i) final { return temps_[i]; }
-};
-
-
-class LTailCallThroughMegamorphicCache final
-    : public LTemplateInstruction<0, 3, 0> {
- public:
-  LTailCallThroughMegamorphicCache(LOperand* context, LOperand* receiver,
-                                   LOperand* name) {
-    inputs_[0] = context;
-    inputs_[1] = receiver;
-    inputs_[2] = name;
-  }
-
-  LOperand* context() { return inputs_[0]; }
-  LOperand* receiver() { return inputs_[1]; }
-  LOperand* name() { return inputs_[2]; }
-
-  DECLARE_CONCRETE_INSTRUCTION(TailCallThroughMegamorphicCache,
-                               "tail-call-through-megamorphic-cache")
-  DECLARE_HYDROGEN_ACCESSOR(TailCallThroughMegamorphicCache)
 };
 
 
@@ -740,7 +721,7 @@ class LArithmeticT final : public LTemplateInstruction<1, 3, 0> {
 
   DECLARE_HYDROGEN_ACCESSOR(BinaryOperation)
 
-  LanguageMode language_mode() { return hydrogen()->language_mode(); }
+  Strength strength() { return hydrogen()->strength(); }
 
  private:
   Token::Value op_;
@@ -1182,7 +1163,7 @@ class LCmpT final : public LTemplateInstruction<1, 3, 0> {
   DECLARE_CONCRETE_INSTRUCTION(CmpT, "cmp-t")
   DECLARE_HYDROGEN_ACCESSOR(CompareGeneric)
 
-  LanguageMode language_mode() { return hydrogen()->language_mode(); }
+  Strength strength() { return hydrogen()->strength(); }
 
   Token::Value op() const { return hydrogen()->token(); }
 };
@@ -1553,8 +1534,12 @@ class LCallWithDescriptor final : public LTemplateResultInstruction<1> {
   LCallWithDescriptor(CallInterfaceDescriptor descriptor,
                       const ZoneList<LOperand*>& operands, Zone* zone)
       : descriptor_(descriptor),
-        inputs_(descriptor.GetRegisterParameterCount() + 1, zone) {
-    DCHECK(descriptor.GetRegisterParameterCount() + 1 == operands.length());
+        inputs_(descriptor.GetRegisterParameterCount() +
+                    kImplicitRegisterParameterCount,
+                zone) {
+    DCHECK(descriptor.GetRegisterParameterCount() +
+               kImplicitRegisterParameterCount ==
+           operands.length());
     inputs_.AddAll(operands, zone);
   }
 
@@ -1563,6 +1548,10 @@ class LCallWithDescriptor final : public LTemplateResultInstruction<1> {
   CallInterfaceDescriptor descriptor() { return descriptor_; }
 
   DECLARE_HYDROGEN_ACCESSOR(CallWithDescriptor)
+
+  // The target and context are passed as implicit parameters that are not
+  // explicitly listed in the descriptor.
+  static const int kImplicitRegisterParameterCount = 2;
 
  private:
   DECLARE_CONCRETE_INSTRUCTION(CallWithDescriptor, "call-with-descriptor")
@@ -1686,6 +1675,23 @@ class LIsUndetectableAndBranch final : public LControlInstruction<1, 1> {
 };
 
 
+class LLoadGlobalViaContext final : public LTemplateInstruction<1, 1, 1> {
+ public:
+  explicit LLoadGlobalViaContext(LOperand* context) { inputs_[0] = context; }
+
+  DECLARE_CONCRETE_INSTRUCTION(LoadGlobalViaContext, "load-global-via-context")
+  DECLARE_HYDROGEN_ACCESSOR(LoadGlobalViaContext)
+
+  void PrintDataTo(StringStream* stream) override;
+
+  LOperand* context() { return inputs_[0]; }
+
+  Handle<Object> name() const { return hydrogen()->name(); }
+  int depth() const { return hydrogen()->depth(); }
+  int slot_index() const { return hydrogen()->slot_index(); }
+};
+
+
 class LLoadContextSlot final : public LTemplateInstruction<1, 1, 0> {
  public:
   explicit LLoadContextSlot(LOperand* context) {
@@ -1761,7 +1767,7 @@ class LLoadGlobalGeneric final : public LTemplateInstruction<1, 2, 1> {
   DECLARE_HYDROGEN_ACCESSOR(LoadGlobalGeneric)
 
   Handle<Object> name() const { return hydrogen()->name(); }
-  bool for_typeof() const { return hydrogen()->for_typeof(); }
+  TypeofMode typeof_mode() const { return hydrogen()->typeof_mode(); }
 };
 
 
@@ -2468,6 +2474,29 @@ class LStackCheck final : public LTemplateInstruction<0, 1, 0> {
 };
 
 
+class LStoreGlobalViaContext final : public LTemplateInstruction<0, 2, 0> {
+ public:
+  LStoreGlobalViaContext(LOperand* context, LOperand* value) {
+    inputs_[0] = context;
+    inputs_[1] = value;
+  }
+
+  LOperand* context() { return inputs_[0]; }
+  LOperand* value() { return inputs_[1]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(StoreGlobalViaContext,
+                               "store-global-via-context")
+  DECLARE_HYDROGEN_ACCESSOR(StoreGlobalViaContext)
+
+  void PrintDataTo(StringStream* stream) override;
+
+  Handle<Object> name() const { return hydrogen()->name(); }
+  int depth() { return hydrogen()->depth(); }
+  int slot_index() { return hydrogen()->slot_index(); }
+  LanguageMode language_mode() { return hydrogen()->language_mode(); }
+};
+
+
 template<int T>
 class LStoreKeyed : public LTemplateInstruction<0, 3, T> {
  public:
@@ -2566,22 +2595,24 @@ class LStoreKeyedFixedDouble final : public LStoreKeyed<1> {
 };
 
 
-class LStoreKeyedGeneric final : public LTemplateInstruction<0, 4, 0> {
+class LStoreKeyedGeneric final : public LTemplateInstruction<0, 4, 2> {
  public:
-  LStoreKeyedGeneric(LOperand* context,
-                     LOperand* obj,
-                     LOperand* key,
-                     LOperand* value) {
+  LStoreKeyedGeneric(LOperand* context, LOperand* object, LOperand* key,
+                     LOperand* value, LOperand* slot, LOperand* vector) {
     inputs_[0] = context;
-    inputs_[1] = obj;
+    inputs_[1] = object;
     inputs_[2] = key;
     inputs_[3] = value;
+    temps_[0] = slot;
+    temps_[1] = vector;
   }
 
   LOperand* context() { return inputs_[0]; }
   LOperand* object() { return inputs_[1]; }
   LOperand* key() { return inputs_[2]; }
   LOperand* value() { return inputs_[3]; }
+  LOperand* temp_slot() { return temps_[0]; }
+  LOperand* temp_vector() { return temps_[1]; }
 
   DECLARE_CONCRETE_INSTRUCTION(StoreKeyedGeneric, "store-keyed-generic")
   DECLARE_HYDROGEN_ACCESSOR(StoreKeyedGeneric)
@@ -2618,17 +2649,22 @@ class LStoreNamedField final : public LTemplateInstruction<0, 2, 2> {
 };
 
 
-class LStoreNamedGeneric final : public LTemplateInstruction<0, 3, 0> {
+class LStoreNamedGeneric final : public LTemplateInstruction<0, 3, 2> {
  public:
-  LStoreNamedGeneric(LOperand* context, LOperand* object, LOperand* value) {
+  LStoreNamedGeneric(LOperand* context, LOperand* object, LOperand* value,
+                     LOperand* slot, LOperand* vector) {
     inputs_[0] = context;
     inputs_[1] = object;
     inputs_[2] = value;
+    temps_[0] = slot;
+    temps_[1] = vector;
   }
 
   LOperand* context() { return inputs_[0]; }
   LOperand* object() { return inputs_[1]; }
   LOperand* value() { return inputs_[2]; }
+  LOperand* temp_slot() { return temps_[0]; }
+  LOperand* temp_vector() { return temps_[1]; }
 
   DECLARE_CONCRETE_INSTRUCTION(StoreNamedGeneric, "store-named-generic")
   DECLARE_HYDROGEN_ACCESSOR(StoreNamedGeneric)

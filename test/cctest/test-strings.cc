@@ -1085,8 +1085,9 @@ TEST(CachedHashOverflow) {
     CHECK_EQ(results[i]->IsUndefined(), result->IsUndefined());
     CHECK_EQ(results[i]->IsNumber(), result->IsNumber());
     if (result->IsNumber()) {
-      CHECK_EQ(Object::ToSmi(isolate, results[i]).ToHandleChecked()->value(),
-               result->ToInt32(CcTest::isolate())->Value());
+      int32_t value = 0;
+      CHECK(results[i]->ToInt32(&value));
+      CHECK_EQ(value, result->ToInt32(CcTest::isolate())->Value());
     }
   }
 }
@@ -1222,7 +1223,7 @@ UNINITIALIZED_TEST(OneByteArrayJoin) {
     // summing the lengths of the strings (as Smis) overflows and wraps.
     LocalContext context(isolate);
     v8::HandleScope scope(isolate);
-    v8::TryCatch try_catch;
+    v8::TryCatch try_catch(isolate);
     CHECK(CompileRun(
               "var two_14 = Math.pow(2, 14);"
               "var two_17 = Math.pow(2, 17);"

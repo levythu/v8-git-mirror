@@ -23,11 +23,16 @@ struct MipsLinkageHelperTraits {
     return s0.bit() | s1.bit() | s2.bit() | s3.bit() | s4.bit() | s5.bit() |
            s6.bit() | s7.bit();
   }
+  static RegList CCalleeSaveFPRegisters() {
+    return f20.bit() | f22.bit() | f24.bit() | f26.bit() | f28.bit() |
+           f30.bit();
+  }
   static Register CRegisterParameter(int i) {
     static Register register_parameters[] = {a0, a1, a2, a3, a4, a5, a6, a7};
     return register_parameters[i];
   }
   static int CRegisterParametersLength() { return 8; }
+  static int CStackBackingStoreLength() { return 0; }
 };
 
 
@@ -61,6 +66,12 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 CallDescriptor* Linkage::GetSimplifiedCDescriptor(Zone* zone,
                                                   const MachineSignature* sig) {
   return LH::GetSimplifiedCDescriptor(zone, sig);
+}
+
+
+CallDescriptor* Linkage::GetInterpreterDispatchDescriptor(
+    Zone* zone, const MachineSignature* sig) {
+  return LH::GetInterpreterDispatchDescriptor(zone, sig);
 }
 
 }  // namespace compiler

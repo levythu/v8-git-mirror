@@ -926,8 +926,8 @@ void MacroAssembler::PushPopQueue::PushQueued(
     masm_->PushPreamble(size_);
   }
 
-  int count = queued_.size();
-  int index = 0;
+  size_t count = queued_.size();
+  size_t index = 0;
   while (index < count) {
     // PushHelper can only handle registers with the same size and type, and it
     // can handle only four at a time. Batch them up accordingly.
@@ -949,8 +949,8 @@ void MacroAssembler::PushPopQueue::PushQueued(
 void MacroAssembler::PushPopQueue::PopQueued() {
   if (queued_.empty()) return;
 
-  int count = queued_.size();
-  int index = 0;
+  size_t count = queued_.size();
+  size_t index = 0;
   while (index < count) {
     // PopHelper can only handle registers with the same size and type, and it
     // can handle only four at a time. Batch them up accordingly.
@@ -1263,7 +1263,7 @@ void MacroAssembler::PushCalleeSavedRegisters() {
   // system stack pointer (csp).
   DCHECK(csp.Is(StackPointer()));
 
-  MemOperand tos(csp, -2 * kXRegSize, PreIndex);
+  MemOperand tos(csp, -2 * static_cast<int>(kXRegSize), PreIndex);
 
   stp(d14, d15, tos);
   stp(d12, d13, tos);
@@ -3033,7 +3033,7 @@ void MacroAssembler::DebugBreak() {
   Mov(x1, ExternalReference(Runtime::kDebugBreak, isolate()));
   CEntryStub ces(isolate(), 1);
   DCHECK(AllowThisStubCall(&ces));
-  Call(ces.GetCode(), RelocInfo::DEBUG_BREAK);
+  Call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
 }
 
 
@@ -3220,26 +3220,6 @@ void MacroAssembler::Allocate(Register object_size,
   if ((flags & TAG_OBJECT) != 0) {
     ObjectTag(result, result);
   }
-}
-
-
-void MacroAssembler::UndoAllocationInNewSpace(Register object,
-                                              Register scratch) {
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
-
-  // Make sure the object has no tag before resetting top.
-  Bic(object, object, kHeapObjectTagMask);
-#ifdef DEBUG
-  // Check that the object un-allocated is below the current top.
-  Mov(scratch, new_space_allocation_top);
-  Ldr(scratch, MemOperand(scratch));
-  Cmp(object, scratch);
-  Check(lt, kUndoAllocationOfNonAllocatedMemory);
-#endif
-  // Write the address of the object to un-allocate as the current top.
-  Mov(scratch, new_space_allocation_top);
-  Str(object, MemOperand(scratch));
 }
 
 
@@ -3928,6 +3908,7 @@ void MacroAssembler::GetNumberHash(Register key, Register scratch) {
   Add(key, key, scratch);
   // hash = hash ^ (hash >> 16);
   Eor(key, key, Operand(key, LSR, 16));
+  Bic(key, key, Operand(0xc0000000u));
 }
 
 
@@ -4416,21 +4397,29 @@ void MacroAssembler::JumpIfDictionaryInPrototypeChain(
     Register scratch1,
     Label* found) {
   DCHECK(!AreAliased(object, scratch0, scratch1));
-  Factory* factory = isolate()->factory();
   Register current = scratch0;
-  Label loop_again;
+  Label loop_again, end;
 
   // Scratch contains elements pointer.
   Mov(current, object);
+  Ldr(current, FieldMemOperand(current, HeapObject::kMapOffset));
+  Ldr(current, FieldMemOperand(current, Map::kPrototypeOffset));
+  CompareAndBranch(current, Heap::kNullValueRootIndex, eq, &end);
 
   // Loop based on the map going up the prototype chain.
   Bind(&loop_again);
   Ldr(current, FieldMemOperand(current, HeapObject::kMapOffset));
+  STATIC_ASSERT(JS_PROXY_TYPE < JS_OBJECT_TYPE);
+  STATIC_ASSERT(JS_VALUE_TYPE < JS_OBJECT_TYPE);
+  CompareInstanceType(current, scratch1, JS_OBJECT_TYPE);
+  B(lo, found);
   Ldrb(scratch1, FieldMemOperand(current, Map::kBitField2Offset));
   DecodeField<Map::ElementsKindBits>(scratch1);
   CompareAndBranch(scratch1, DICTIONARY_ELEMENTS, eq, found);
   Ldr(current, FieldMemOperand(current, Map::kPrototypeOffset));
-  CompareAndBranch(current, Operand(factory->null_value()), ne, &loop_again);
+  CompareAndBranch(current, Heap::kNullValueRootIndex, ne, &loop_again);
+
+  Bind(&end);
 }
 
 
@@ -4693,7 +4682,7 @@ void MacroAssembler::LoadTransitionedArrayMapConditional(
 
   // Check that the function's map is the same as the expected cached map.
   Ldr(scratch1, ContextMemOperand(scratch1, Context::JS_ARRAY_MAPS_INDEX));
-  size_t offset = (expected_kind * kPointerSize) + FixedArrayBase::kHeaderSize;
+  int offset = (expected_kind * kPointerSize) + FixedArrayBase::kHeaderSize;
   Ldr(scratch2, FieldMemOperand(scratch1, offset));
   Cmp(map_in_out, scratch2);
   B(ne, no_map_match);
@@ -5115,7 +5104,8 @@ void InlineSmiCheckInfo::Emit(MacroAssembler* masm, const Register& reg,
     // 'check' in the other bits. The possible offset is limited in that we
     // use BitField to pack the data, and the underlying data type is a
     // uint32_t.
-    uint32_t delta = __ InstructionsGeneratedSince(smi_check);
+    uint32_t delta =
+        static_cast<uint32_t>(__ InstructionsGeneratedSince(smi_check));
     __ InlineData(RegisterBits::encode(reg.code()) | DeltaBits::encode(delta));
   } else {
     DCHECK(!smi_check->is_bound());
@@ -5136,9 +5126,10 @@ InlineSmiCheckInfo::InlineSmiCheckInfo(Address info)
     // 32-bit values.
     DCHECK(is_uint32(payload));
     if (payload != 0) {
-      int reg_code = RegisterBits::decode(payload);
+      uint32_t payload32 = static_cast<uint32_t>(payload);
+      int reg_code = RegisterBits::decode(payload32);
       reg_ = Register::XRegFromCode(reg_code);
-      uint64_t smi_check_delta = DeltaBits::decode(payload);
+      int smi_check_delta = DeltaBits::decode(payload32);
       DCHECK(smi_check_delta != 0);
       smi_check_ = inline_data->preceding(smi_check_delta);
     }
@@ -5149,6 +5140,7 @@ InlineSmiCheckInfo::InlineSmiCheckInfo(Address info)
 #undef __
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_TARGET_ARCH_ARM64

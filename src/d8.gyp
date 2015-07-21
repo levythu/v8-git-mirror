@@ -48,9 +48,14 @@
         '..',
       ],
       'sources': [
+        'd8.h',
         'd8.cc',
         'startup-data-util.h',
         'startup-data-util.cc'
+      ],
+      'defines': [
+        # TODO(jochen): Remove again after this is globally turned on.
+        'V8_IMMINENT_DEPRECATION_WARNINGS',
       ],
       'conditions': [
         [ 'want_separate_host_toolset==1', {
@@ -69,7 +74,11 @@
           'sources': [ 'd8-windows.cc', ]
         }],
         [ 'component!="shared_library"', {
-          'sources': [ 'd8-debug.cc', '<(SHARED_INTERMEDIATE_DIR)/d8-js.cc', ],
+          'sources': [
+            'd8-debug.h',
+            'd8-debug.cc',
+            '<(SHARED_INTERMEDIATE_DIR)/d8-js.cc',
+          ],
           'conditions': [
             [ 'want_separate_host_toolset==1', {
               'dependencies': [

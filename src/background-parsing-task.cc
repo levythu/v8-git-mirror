@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/background-parsing-task.h"
+#include "src/debug.h"
 
 namespace v8 {
 namespace internal {
@@ -31,7 +32,7 @@ BackgroundParsingTask::BackgroundParsingTask(
   info->set_global();
   info->set_unicode_cache(&source_->unicode_cache);
 
-  bool disable_lazy = Compiler::DebuggerWantsEagerCompilation(isolate);
+  bool disable_lazy = isolate->debug()->RequiresEagerCompilation();
   if (disable_lazy && options == ScriptCompiler::kProduceParserCache) {
     // Producing cached data while parsing eagerly is not supported.
     options = ScriptCompiler::kNoCompileOptions;
@@ -71,5 +72,5 @@ void BackgroundParsingTask::Run() {
     delete script_data;
   }
 }
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8

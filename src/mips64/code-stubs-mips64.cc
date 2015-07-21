@@ -93,7 +93,7 @@ void InternalArrayNArgumentsConstructorStub::InitializeDescriptor(
 
 
 static void EmitIdenticalObjectComparison(MacroAssembler* masm, Label* slow,
-                                          Condition cc, bool strong);
+                                          Condition cc, Strength strength);
 static void EmitSmiNonsmiComparison(MacroAssembler* masm,
                                     Register lhs,
                                     Register rhs,
@@ -111,17 +111,17 @@ void HydrogenCodeStub::GenerateLightweightMiss(MacroAssembler* masm,
   isolate()->counters()->code_stubs()->Increment();
 
   CallInterfaceDescriptor descriptor = GetCallInterfaceDescriptor();
-  int param_count = descriptor.GetEnvironmentParameterCount();
+  int param_count = descriptor.GetRegisterParameterCount();
   {
     // Call the runtime system in a fresh internal frame.
     FrameScope scope(masm, StackFrame::INTERNAL);
     DCHECK((param_count == 0) ||
-           a0.is(descriptor.GetEnvironmentParameterRegister(param_count - 1)));
+           a0.is(descriptor.GetRegisterParameter(param_count - 1)));
     // Push arguments, adjust sp.
     __ Dsubu(sp, sp, Operand(param_count * kPointerSize));
     for (int i = 0; i < param_count; ++i) {
       // Store argument to stack.
-      __ sd(descriptor.GetEnvironmentParameterRegister(i),
+      __ sd(descriptor.GetRegisterParameter(i),
             MemOperand(sp, (param_count - 1 - i) * kPointerSize));
     }
     __ CallExternalReference(miss, param_count);
@@ -272,7 +272,7 @@ void DoubleToIStub::Generate(MacroAssembler* masm) {
 // Equality is almost reflexive (everything but NaN), so this is a test
 // for "identity and not NaN".
 static void EmitIdenticalObjectComparison(MacroAssembler* masm, Label* slow,
-                                          Condition cc, bool strong) {
+                                          Condition cc, Strength strength) {
   Label not_identical;
   Label heap_number, return_equal;
   Register exp_mask_reg = t1;
@@ -291,7 +291,9 @@ static void EmitIdenticalObjectComparison(MacroAssembler* masm, Label* slow,
     __ Branch(slow, greater, t0, Operand(FIRST_SPEC_OBJECT_TYPE));
     // Call runtime on identical symbols since we need to throw a TypeError.
     __ Branch(slow, eq, t0, Operand(SYMBOL_TYPE));
-    if (strong) {
+    // Call runtime on identical SIMD values since we must throw a TypeError.
+    __ Branch(slow, eq, t0, Operand(FLOAT32X4_TYPE));
+    if (is_strong(strength)) {
       // Call the runtime on anything that is converted in the semantics, since
       // we need to throw a TypeError. Smis have already been ruled out.
       __ Branch(&return_equal, eq, t0, Operand(HEAP_NUMBER_TYPE));
@@ -305,7 +307,9 @@ static void EmitIdenticalObjectComparison(MacroAssembler* masm, Label* slow,
     __ Branch(slow, greater, t0, Operand(FIRST_SPEC_OBJECT_TYPE));
     // Call runtime on identical symbols since we need to throw a TypeError.
     __ Branch(slow, eq, t0, Operand(SYMBOL_TYPE));
-    if (strong) {
+    // Call runtime on identical SIMD values since we must throw a TypeError.
+    __ Branch(slow, eq, t0, Operand(FLOAT32X4_TYPE));
+    if (is_strong(strength)) {
       // Call the runtime on anything that is converted in the semantics,
       // since we need to throw a TypeError. Smis and heap numbers have
       // already been ruled out.
@@ -595,7 +599,7 @@ void CompareICStub::GenerateGeneric(MacroAssembler* masm) {
 
   // Handle the case where the objects are identical.  Either returns the answer
   // or goes to slow.  Only falls through if the objects were not identical.
-  EmitIdenticalObjectComparison(masm, &slow, cc, strong());
+  EmitIdenticalObjectComparison(masm, &slow, cc, strength());
 
   // If either is a Smi (we know that not both are), then they can only
   // be strictly equal if the other is a HeapNumber.
@@ -723,7 +727,8 @@ void CompareICStub::GenerateGeneric(MacroAssembler* masm) {
   if (cc == eq) {
     native = strict() ? Builtins::STRICT_EQUALS : Builtins::EQUALS;
   } else {
-    native = strong() ? Builtins::COMPARE_STRONG : Builtins::COMPARE;
+    native =
+        is_strong(strength()) ? Builtins::COMPARE_STRONG : Builtins::COMPARE;
     int ncr;  // NaN compare result.
     if (cc == lt || cc == le) {
       ncr = GREATER;
@@ -1386,8 +1391,7 @@ void LoadIndexedStringStub::Generate(MacroAssembler* masm) {
   Register scratch = a5;
   Register result = v0;
   DCHECK(!scratch.is(receiver) && !scratch.is(index));
-  DCHECK(!FLAG_vector_ics ||
-         !scratch.is(VectorLoadICDescriptor::VectorRegister()));
+  DCHECK(!scratch.is(LoadWithVectorDescriptor::VectorRegister()));
 
   StringCharAtGenerator char_at_generator(receiver, index, scratch, result,
                                           &miss,  // When not a string.
@@ -1611,9 +1615,8 @@ void FunctionPrototypeStub::Generate(MacroAssembler* masm) {
   Register receiver = LoadDescriptor::ReceiverRegister();
   // Ensure that the vector and slot registers won't be clobbered before
   // calling the miss handler.
-  DCHECK(!FLAG_vector_ics ||
-         !AreAliased(a4, a5, VectorLoadICDescriptor::VectorRegister(),
-                     VectorLoadICDescriptor::SlotRegister()));
+  DCHECK(!AreAliased(a4, a5, LoadWithVectorDescriptor::VectorRegister(),
+                     LoadWithVectorDescriptor::SlotRegister()));
 
   NamedLoadHandlerCompiler::GenerateLoadFunctionPrototype(masm, receiver, a4,
                                                           a5, &miss);
@@ -1624,7 +1627,6 @@ void FunctionPrototypeStub::Generate(MacroAssembler* masm) {
 
 
 void ArgumentsAccessStub::GenerateReadElement(MacroAssembler* masm) {
-  CHECK(!has_new_target());
   // The displacement is the offset of the last parameter (if any)
   // relative to the frame pointer.
   const int kDisplacement =
@@ -1684,8 +1686,6 @@ void ArgumentsAccessStub::GenerateNewSloppySlow(MacroAssembler* masm) {
   // sp[4] : receiver displacement
   // sp[8] : function
 
-  CHECK(!has_new_target());
-
   // Check if the calling frame is an arguments adaptor frame.
   Label runtime;
   __ ld(a3, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
@@ -1716,8 +1716,6 @@ void ArgumentsAccessStub::GenerateNewSloppyFast(MacroAssembler* masm) {
   // Registers used over whole function:
   //  a6 : allocated object (tagged)
   //  t1 : mapped parameter count (tagged)
-
-  CHECK(!has_new_target());
 
   __ ld(a1, MemOperand(sp, 0 * kPointerSize));
   // a1 = parameter count (tagged)
@@ -1784,7 +1782,7 @@ void ArgumentsAccessStub::GenerateNewSloppyFast(MacroAssembler* masm) {
   const int kNormalOffset =
       Context::SlotOffset(Context::SLOPPY_ARGUMENTS_MAP_INDEX);
   const int kAliasedOffset =
-      Context::SlotOffset(Context::ALIASED_ARGUMENTS_MAP_INDEX);
+      Context::SlotOffset(Context::FAST_ALIASED_ARGUMENTS_MAP_INDEX);
 
   __ ld(a4, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
   __ ld(a4, FieldMemOperand(a4, GlobalObject::kNativeContextOffset));
@@ -1975,15 +1973,6 @@ void ArgumentsAccessStub::GenerateNewStrict(MacroAssembler* masm) {
   // Patch the arguments.length and the parameters pointer.
   __ bind(&adaptor_frame);
   __ ld(a1, MemOperand(a2, ArgumentsAdaptorFrameConstants::kLengthOffset));
-  if (has_new_target()) {
-    Label skip_decrement;
-    __ Branch(&skip_decrement, eq, a1, Operand(Smi::FromInt(0)));
-    // Subtract 1 from smi-tagged arguments count.
-    __ SmiUntag(a1);
-    __ Daddu(a1, a1, Operand(-1));
-    __ SmiTag(a1);
-    __ bind(&skip_decrement);
-  }
   __ sd(a1, MemOperand(sp, 0));
   __ SmiScale(at, a1, kPointerSizeLog2);
 
@@ -2068,9 +2057,10 @@ void ArgumentsAccessStub::GenerateNewStrict(MacroAssembler* masm) {
 
 
 void RestParamAccessStub::GenerateNew(MacroAssembler* masm) {
-  // sp[0] : index of rest parameter
-  // sp[4] : number of parameters
-  // sp[8] : receiver displacement
+  // sp[0] : language mode
+  // sp[4] : index of rest parameter
+  // sp[8] : number of parameters
+  // sp[12] : receiver displacement
   // Check if the calling frame is an arguments adaptor frame.
 
   Label runtime;
@@ -2081,17 +2071,17 @@ void RestParamAccessStub::GenerateNew(MacroAssembler* masm) {
 
   // Patch the arguments.length and the parameters pointer.
   __ ld(a1, MemOperand(a2, ArgumentsAdaptorFrameConstants::kLengthOffset));
-  __ sd(a1, MemOperand(sp, 1 * kPointerSize));
+  __ sd(a1, MemOperand(sp, 2 * kPointerSize));
   __ SmiScale(at, a1, kPointerSizeLog2);
 
   __ Daddu(a3, a2, Operand(at));
 
   __ Daddu(a3, a3, Operand(StandardFrameConstants::kCallerSPOffset));
-  __ sd(a3, MemOperand(sp, 2 * kPointerSize));
+  __ sd(a3, MemOperand(sp, 3 * kPointerSize));
 
   // Do the runtime call to allocate the arguments object.
   __ bind(&runtime);
-  __ TailCallRuntime(Runtime::kNewRestParam, 3, 1);
+  __ TailCallRuntime(Runtime::kNewRestParam, 4, 1);
 }
 
 
@@ -2794,16 +2784,23 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
   // a0 : number of arguments
   // a1 : the function to call
   // a2 : feedback vector
-  // a3 : (only if a2 is not undefined) slot in feedback vector (Smi)
+  // a3 : slot in feedback vector (Smi, for RecordCallTarget)
+  // a4 : original constructor (for IsSuperConstructorCall)
   Label slow, non_function_call;
   // Check that the function is not a smi.
   __ JumpIfSmi(a1, &non_function_call);
   // Check that the function is a JSFunction.
-  __ GetObjectType(a1, a4, a4);
-  __ Branch(&slow, ne, a4, Operand(JS_FUNCTION_TYPE));
+  __ GetObjectType(a1, a5, a5);
+  __ Branch(&slow, ne, a5, Operand(JS_FUNCTION_TYPE));
 
   if (RecordCallTarget()) {
+    if (IsSuperConstructorCall()) {
+      __ push(a4);
+    }
     GenerateRecordCallTarget(masm);
+    if (IsSuperConstructorCall()) {
+      __ pop(a4);
+    }
 
     __ dsrl(at, a3, 32 - kPointerSizeLog2);
     __ Daddu(a5, a2, at);
@@ -2828,11 +2825,7 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
 
   // Pass function as original constructor.
   if (IsSuperConstructorCall()) {
-    __ li(a4, Operand(1 * kPointerSize));
-    __ dsll(at, a0, kPointerSizeLog2);
-    __ daddu(a4, a4, at);
-    __ daddu(at, sp, a4);
-    __ ld(a3, MemOperand(at, 0));
+    __ mov(a3, a4);
   } else {
     __ mov(a3, a1);
   }
@@ -2847,10 +2840,10 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
 
   // a0: number of arguments
   // a1: called object
-  // a4: object type
+  // a5: object type
   Label do_call;
   __ bind(&slow);
-  __ Branch(&non_function_call, ne, a4, Operand(JS_FUNCTION_PROXY_TYPE));
+  __ Branch(&non_function_call, ne, a5, Operand(JS_FUNCTION_PROXY_TYPE));
   __ GetBuiltinFunction(a1, Builtins::CALL_FUNCTION_PROXY_AS_CONSTRUCTOR);
   __ jmp(&do_call);
 
@@ -2932,6 +2925,13 @@ void CallIC_ArrayStub::Generate(MacroAssembler* masm) {
   __ LoadRoot(at, Heap::kAllocationSiteMapRootIndex);
   __ Branch(&miss, ne, a5, Operand(at));
 
+  // Increment the call count for monomorphic function calls.
+  __ dsrl(t0, a3, 32 - kPointerSizeLog2);
+  __ Daddu(a3, a2, Operand(t0));
+  __ ld(t0, FieldMemOperand(a3, FixedArray::kHeaderSize + kPointerSize));
+  __ Daddu(t0, t0, Operand(Smi::FromInt(CallICNexus::kCallCountIncrement)));
+  __ sd(t0, FieldMemOperand(a3, FixedArray::kHeaderSize + kPointerSize));
+
   __ mov(a2, a4);
   __ mov(a3, a1);
   ArrayConstructorStub stub(masm->isolate(), arg_count());
@@ -2990,6 +2990,13 @@ void CallICStub::Generate(MacroAssembler* masm) {
   // The compare above could have been a SMI/SMI comparison. Guard against this
   // convincing us that we have a monomorphic JSFunction.
   __ JumpIfSmi(a1, &extra_checks_or_miss);
+
+  // Increment the call count for monomorphic function calls.
+  __ dsrl(t0, a3, 32 - kPointerSizeLog2);
+  __ Daddu(a3, a2, Operand(t0));
+  __ ld(t0, FieldMemOperand(a3, FixedArray::kHeaderSize + kPointerSize));
+  __ Daddu(t0, t0, Operand(Smi::FromInt(CallICNexus::kCallCountIncrement)));
+  __ sd(t0, FieldMemOperand(a3, FixedArray::kHeaderSize + kPointerSize));
 
   __ bind(&have_js_function);
   if (CallAsMethod()) {
@@ -3066,6 +3073,12 @@ void CallICStub::Generate(MacroAssembler* masm) {
   __ Daddu(a4, a4, Operand(Smi::FromInt(1)));
   __ sd(a4, FieldMemOperand(a2, with_types_offset));
 
+  // Initialize the call counter.
+  __ dsrl(at, a3, 32 - kPointerSizeLog2);
+  __ Daddu(at, a2, Operand(at));
+  __ li(t0, Operand(Smi::FromInt(CallICNexus::kCallCountIncrement)));
+  __ sd(t0, FieldMemOperand(at, FixedArray::kHeaderSize + kPointerSize));
+
   // Store the function. Use a stub since we need a frame for allocation.
   // a2 - vector
   // a3 - slot
@@ -3131,9 +3144,9 @@ void StringCharCodeAtGenerator::GenerateSlow(
               DONT_DO_SMI_CHECK);
   call_helper.BeforeCall(masm);
   // Consumed by runtime conversion function:
-  if (FLAG_vector_ics && embed_mode == PART_OF_IC_HANDLER) {
-    __ Push(VectorLoadICDescriptor::VectorRegister(),
-            VectorLoadICDescriptor::SlotRegister(), object_, index_);
+  if (embed_mode == PART_OF_IC_HANDLER) {
+    __ Push(LoadWithVectorDescriptor::VectorRegister(),
+            LoadWithVectorDescriptor::SlotRegister(), object_, index_);
   } else {
     __ Push(object_, index_);
   }
@@ -3149,9 +3162,9 @@ void StringCharCodeAtGenerator::GenerateSlow(
   // have a chance to overwrite it.
 
   __ Move(index_, v0);
-  if (FLAG_vector_ics && embed_mode == PART_OF_IC_HANDLER) {
-    __ Pop(VectorLoadICDescriptor::VectorRegister(),
-           VectorLoadICDescriptor::SlotRegister(), object_);
+  if (embed_mode == PART_OF_IC_HANDLER) {
+    __ Pop(LoadWithVectorDescriptor::VectorRegister(),
+           LoadWithVectorDescriptor::SlotRegister(), object_);
   } else {
     __ pop(object_);
   }
@@ -3187,27 +3200,17 @@ void StringCharCodeAtGenerator::GenerateSlow(
 
 void StringCharFromCodeGenerator::GenerateFast(MacroAssembler* masm) {
   // Fast case of Heap::LookupSingleCharacterStringFromCode.
-
-  DCHECK(!a4.is(result_));
-  DCHECK(!a4.is(code_));
-
-  STATIC_ASSERT(kSmiTag == 0);
-  DCHECK(base::bits::IsPowerOfTwo32(String::kMaxOneByteCharCode + 1));
-  __ And(a4,
-         code_,
-         Operand(kSmiTagMask |
-                 ((~String::kMaxOneByteCharCode) << kSmiTagSize)));
-  __ Branch(&slow_case_, ne, a4, Operand(zero_reg));
-
+  __ JumpIfNotSmi(code_, &slow_case_);
+  __ Branch(&slow_case_, hi, code_,
+            Operand(Smi::FromInt(String::kMaxOneByteCharCode)));
 
   __ LoadRoot(result_, Heap::kSingleCharacterStringCacheRootIndex);
   // At this point code register contains smi tagged one_byte char code.
-  STATIC_ASSERT(kSmiTag == 0);
-  __ SmiScale(a4, code_, kPointerSizeLog2);
-  __ Daddu(result_, result_, a4);
+  __ SmiScale(at, code_, kPointerSizeLog2);
+  __ Daddu(result_, result_, at);
   __ ld(result_, FieldMemOperand(result_, FixedArray::kHeaderSize));
-  __ LoadRoot(a4, Heap::kUndefinedValueRootIndex);
-  __ Branch(&slow_case_, eq, result_, Operand(a4));
+  __ LoadRoot(at, Heap::kUndefinedValueRootIndex);
+  __ Branch(&slow_case_, eq, result_, Operand(at));
   __ bind(&exit_);
 }
 
@@ -3295,11 +3298,8 @@ void SubStringStub::Generate(MacroAssembler* masm) {
 
   __ ld(a2, MemOperand(sp, kToOffset));
   __ ld(a3, MemOperand(sp, kFromOffset));
-// Does not needed?
-//  STATIC_ASSERT(kFromOffset == kToOffset + 4);
+
   STATIC_ASSERT(kSmiTag == 0);
-// Does not needed?
-// STATIC_ASSERT(kSmiTagSize + kSmiShiftSize == 1);
 
   // Utilize delay slots. SmiUntag doesn't emit a jump, everything else is
   // safe in this case.
@@ -3492,6 +3492,7 @@ void SubStringStub::Generate(MacroAssembler* masm) {
   // a1: instance type
   // a2: length
   // a3: from index (untagged)
+  __ SmiTag(a3);
   StringCharAtGenerator generator(v0, a3, a2, v0, &runtime, &runtime, &runtime,
                                   STRING_INDEX_IS_NUMBER, RECEIVER_IS_STRING);
   generator.GenerateFast(masm);
@@ -3801,7 +3802,7 @@ void CompareICStub::GenerateNumbers(MacroAssembler* masm) {
 
   __ bind(&unordered);
   __ bind(&generic_stub);
-  CompareICStub stub(isolate(), op(), strong(), CompareICState::GENERIC,
+  CompareICStub stub(isolate(), op(), strength(), CompareICState::GENERIC,
                      CompareICState::GENERIC, CompareICState::GENERIC);
   __ Jump(stub.GetCode(), RelocInfo::CODE_TARGET);
 
@@ -4086,8 +4087,8 @@ void DirectCEntryStub::GenerateCall(MacroAssembler* masm,
   intptr_t loc =
       reinterpret_cast<intptr_t>(GetCode().location());
   __ Move(t9, target);
-  __ li(ra, Operand(loc, RelocInfo::CODE_TARGET), CONSTANT_SIZE);
-  __ Call(ra);
+  __ li(at, Operand(loc, RelocInfo::CODE_TARGET), CONSTANT_SIZE);
+  __ Call(at);
 }
 
 
@@ -4628,15 +4629,15 @@ void StubFailureTrampolineStub::Generate(MacroAssembler* masm) {
 
 
 void LoadICTrampolineStub::Generate(MacroAssembler* masm) {
-  EmitLoadTypeFeedbackVector(masm, VectorLoadICDescriptor::VectorRegister());
-  VectorRawLoadStub stub(isolate(), state());
+  EmitLoadTypeFeedbackVector(masm, LoadWithVectorDescriptor::VectorRegister());
+  LoadICStub stub(isolate(), state());
   stub.GenerateForTrampoline(masm);
 }
 
 
 void KeyedLoadICTrampolineStub::Generate(MacroAssembler* masm) {
-  EmitLoadTypeFeedbackVector(masm, VectorLoadICDescriptor::VectorRegister());
-  VectorRawKeyedLoadStub stub(isolate());
+  EmitLoadTypeFeedbackVector(masm, LoadWithVectorDescriptor::VectorRegister());
+  KeyedLoadICStub stub(isolate(), state());
   stub.GenerateForTrampoline(masm);
 }
 
@@ -4655,12 +4656,10 @@ void CallIC_ArrayTrampolineStub::Generate(MacroAssembler* masm) {
 }
 
 
-void VectorRawLoadStub::Generate(MacroAssembler* masm) {
-  GenerateImpl(masm, false);
-}
+void LoadICStub::Generate(MacroAssembler* masm) { GenerateImpl(masm, false); }
 
 
-void VectorRawLoadStub::GenerateForTrampoline(MacroAssembler* masm) {
+void LoadICStub::GenerateForTrampoline(MacroAssembler* masm) {
   GenerateImpl(masm, true);
 }
 
@@ -4753,11 +4752,11 @@ static void HandleMonomorphicCase(MacroAssembler* masm, Register receiver,
 }
 
 
-void VectorRawLoadStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
-  Register receiver = VectorLoadICDescriptor::ReceiverRegister();  // a1
-  Register name = VectorLoadICDescriptor::NameRegister();          // a2
-  Register vector = VectorLoadICDescriptor::VectorRegister();      // a3
-  Register slot = VectorLoadICDescriptor::SlotRegister();          // a0
+void LoadICStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
+  Register receiver = LoadWithVectorDescriptor::ReceiverRegister();  // a1
+  Register name = LoadWithVectorDescriptor::NameRegister();          // a2
+  Register vector = LoadWithVectorDescriptor::VectorRegister();      // a3
+  Register slot = LoadWithVectorDescriptor::SlotRegister();          // a0
   Register feedback = a4;
   Register receiver_map = a5;
   Register scratch1 = a6;
@@ -4800,21 +4799,21 @@ void VectorRawLoadStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
 }
 
 
-void VectorRawKeyedLoadStub::Generate(MacroAssembler* masm) {
+void KeyedLoadICStub::Generate(MacroAssembler* masm) {
   GenerateImpl(masm, false);
 }
 
 
-void VectorRawKeyedLoadStub::GenerateForTrampoline(MacroAssembler* masm) {
+void KeyedLoadICStub::GenerateForTrampoline(MacroAssembler* masm) {
   GenerateImpl(masm, true);
 }
 
 
-void VectorRawKeyedLoadStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
-  Register receiver = VectorLoadICDescriptor::ReceiverRegister();  // a1
-  Register key = VectorLoadICDescriptor::NameRegister();           // a2
-  Register vector = VectorLoadICDescriptor::VectorRegister();      // a3
-  Register slot = VectorLoadICDescriptor::SlotRegister();          // a0
+void KeyedLoadICStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
+  Register receiver = LoadWithVectorDescriptor::ReceiverRegister();  // a1
+  Register key = LoadWithVectorDescriptor::NameRegister();           // a2
+  Register vector = LoadWithVectorDescriptor::VectorRegister();      // a3
+  Register slot = LoadWithVectorDescriptor::SlotRegister();          // a0
   Register feedback = a4;
   Register receiver_map = a5;
   Register scratch1 = a6;
@@ -4849,7 +4848,7 @@ void VectorRawKeyedLoadStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
   __ LoadRoot(at, Heap::kmegamorphic_symbolRootIndex);
   __ Branch(&try_poly_name, ne, feedback, Operand(at));
   Handle<Code> megamorphic_stub =
-      KeyedLoadIC::ChooseMegamorphicStub(masm->isolate());
+      KeyedLoadIC::ChooseMegamorphicStub(masm->isolate(), GetExtraICState());
   __ Jump(megamorphic_stub, RelocInfo::CODE_TARGET);
 
   __ bind(&try_poly_name);
@@ -4870,6 +4869,58 @@ void VectorRawKeyedLoadStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
   __ bind(&load_smi_map);
   __ LoadRoot(receiver_map, Heap::kHeapNumberMapRootIndex);
   __ Branch(&compare_map);
+}
+
+
+void VectorStoreICTrampolineStub::Generate(MacroAssembler* masm) {
+  EmitLoadTypeFeedbackVector(masm, VectorStoreICDescriptor::VectorRegister());
+  VectorStoreICStub stub(isolate(), state());
+  stub.GenerateForTrampoline(masm);
+}
+
+
+void VectorKeyedStoreICTrampolineStub::Generate(MacroAssembler* masm) {
+  EmitLoadTypeFeedbackVector(masm, VectorStoreICDescriptor::VectorRegister());
+  VectorKeyedStoreICStub stub(isolate(), state());
+  stub.GenerateForTrampoline(masm);
+}
+
+
+void VectorStoreICStub::Generate(MacroAssembler* masm) {
+  GenerateImpl(masm, false);
+}
+
+
+void VectorStoreICStub::GenerateForTrampoline(MacroAssembler* masm) {
+  GenerateImpl(masm, true);
+}
+
+
+void VectorStoreICStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
+  Label miss;
+
+  // TODO(mvstanton): Implement.
+  __ bind(&miss);
+  StoreIC::GenerateMiss(masm);
+}
+
+
+void VectorKeyedStoreICStub::Generate(MacroAssembler* masm) {
+  GenerateImpl(masm, false);
+}
+
+
+void VectorKeyedStoreICStub::GenerateForTrampoline(MacroAssembler* masm) {
+  GenerateImpl(masm, true);
+}
+
+
+void VectorKeyedStoreICStub::GenerateImpl(MacroAssembler* masm, bool in_frame) {
+  Label miss;
+
+  // TODO(mvstanton): Implement.
+  __ bind(&miss);
+  KeyedStoreIC::GenerateMiss(masm);
 }
 
 
@@ -5300,9 +5351,9 @@ static void CallApiFunctionAndReturn(
   __ li(s3, Operand(next_address));
   __ ld(s0, MemOperand(s3, kNextOffset));
   __ ld(s1, MemOperand(s3, kLimitOffset));
-  __ ld(s2, MemOperand(s3, kLevelOffset));
-  __ Daddu(s2, s2, Operand(1));
-  __ sd(s2, MemOperand(s3, kLevelOffset));
+  __ lw(s2, MemOperand(s3, kLevelOffset));
+  __ Addu(s2, s2, Operand(1));
+  __ sw(s2, MemOperand(s3, kLevelOffset));
 
   if (FLAG_log_timer_events) {
     FrameScope frame(masm, StackFrame::MANUAL);
@@ -5343,11 +5394,11 @@ static void CallApiFunctionAndReturn(
   // previous handle scope.
   __ sd(s0, MemOperand(s3, kNextOffset));
   if (__ emit_debug_code()) {
-    __ ld(a1, MemOperand(s3, kLevelOffset));
+    __ lw(a1, MemOperand(s3, kLevelOffset));
     __ Check(eq, kUnexpectedLevelAfterReturnFromApiCall, a1, Operand(s2));
   }
-  __ Dsubu(s2, s2, Operand(1));
-  __ sd(s2, MemOperand(s3, kLevelOffset));
+  __ Subu(s2, s2, Operand(1));
+  __ sw(s2, MemOperand(s3, kLevelOffset));
   __ ld(at, MemOperand(s3, kLimitOffset));
   __ Branch(&delete_allocated_handles, ne, s1, Operand(at));
 
@@ -5562,6 +5613,7 @@ void CallApiGetterStub::Generate(MacroAssembler* masm) {
 
 #undef __
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_TARGET_ARCH_MIPS64

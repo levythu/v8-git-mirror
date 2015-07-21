@@ -437,7 +437,7 @@ class MacroAssembler: public Assembler {
   }
 
   // Push a fixed frame, consisting of lr, fp, constant pool (if
-  // FLAG_enable_ool_constant_pool), context and JS function / marker id if
+  // FLAG_enable_embedded_constant_pool), context and JS function / marker id if
   // marker_reg is a valid register.
   void PushFixedFrame(Register marker_reg = no_reg);
   void PopFixedFrame(Register marker_reg = no_reg);
@@ -744,13 +744,6 @@ class MacroAssembler: public Assembler {
                 Register scratch2,
                 Label* gc_required,
                 AllocationFlags flags);
-
-  // Undo allocation in new space. The object passed and objects allocated after
-  // it will no longer be allocated. The caller must make sure that no pointers
-  // are left to the object(s) no longer allocated as they would be invalid when
-  // allocation is undone.
-  void UndoAllocationInNewSpace(Register object, Register scratch);
-
 
   void AllocateTwoByteString(Register result,
                              Register length,
@@ -1441,6 +1434,11 @@ class MacroAssembler: public Assembler {
   void JumpIfDictionaryInPrototypeChain(Register object, Register scratch0,
                                         Register scratch1, Label* found);
 
+  // Loads the constant pool pointer (pp) register.
+  void LoadConstantPoolPointerRegisterFromCodeTargetAddress(
+      Register code_target_address);
+  void LoadConstantPoolPointerRegister();
+
  private:
   void CallCFunctionHelper(Register function,
                            int num_reg_arguments,
@@ -1482,9 +1480,6 @@ class MacroAssembler: public Assembler {
   MemOperand SafepointRegisterSlot(Register reg);
   MemOperand SafepointRegistersAndDoublesSlot(Register reg);
 
-  // Loads the constant pool pointer (pp) register.
-  void LoadConstantPoolPointerRegister();
-
   bool generating_stub_;
   bool has_frame_;
   // This handle will be patched with the code object on installation.
@@ -1511,7 +1506,7 @@ class CodePatcher {
   CodePatcher(byte* address,
               int instructions,
               FlushICache flush_cache = FLUSH);
-  virtual ~CodePatcher();
+  ~CodePatcher();
 
   // Macro assembler to emit code.
   MacroAssembler* masm() { return &masm_; }
