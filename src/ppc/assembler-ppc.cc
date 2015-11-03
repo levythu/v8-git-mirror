@@ -34,7 +34,7 @@
 // modified significantly by Google Inc.
 // Copyright 2014 the V8 project authors. All rights reserved.
 
-#include "src/v8.h"
+#include "src/ppc/assembler-ppc.h"
 
 #if V8_TARGET_ARCH_PPC
 
@@ -125,16 +125,6 @@ Register ToRegister(int num) {
                                  r16, r17, r18, r19, r20, r21, r22, r23,
                                  r24, r25, r26, r27, r28, r29, r30, fp};
   return kRegisters[num];
-}
-
-
-const char* DoubleRegister::AllocationIndexToString(int index) {
-  DCHECK(index >= 0 && index < kMaxNumAllocatableRegisters);
-  const char* const names[] = {
-      "d1",  "d2",  "d3",  "d4",  "d5",  "d6",  "d7",  "d8",  "d9",  "d10",
-      "d11", "d12", "d15", "d16", "d17", "d18", "d19", "d20", "d21", "d22",
-      "d23", "d24", "d25", "d26", "d27", "d28", "d29", "d30", "d31"};
-  return names[index];
 }
 
 
@@ -286,14 +276,14 @@ bool Assembler::IsBranch(Instr instr) { return ((instr & kOpcodeMask) == BCX); }
 
 Register Assembler::GetRA(Instr instr) {
   Register reg;
-  reg.code_ = Instruction::RAValue(instr);
+  reg.reg_code = Instruction::RAValue(instr);
   return reg;
 }
 
 
 Register Assembler::GetRB(Instr instr) {
   Register reg;
-  reg.code_ = Instruction::RBValue(instr);
+  reg.reg_code = Instruction::RBValue(instr);
   return reg;
 }
 
@@ -684,27 +674,27 @@ int Assembler::link(Label* L) {
 // Branch instructions.
 
 
-void Assembler::bclr(BOfield bo, LKBit lk) {
+void Assembler::bclr(BOfield bo, int condition_bit, LKBit lk) {
   positions_recorder()->WriteRecordedPositions();
-  emit(EXT1 | bo | BCLRX | lk);
+  emit(EXT1 | bo | condition_bit * B16 | BCLRX | lk);
 }
 
 
-void Assembler::bcctr(BOfield bo, LKBit lk) {
+void Assembler::bcctr(BOfield bo, int condition_bit, LKBit lk) {
   positions_recorder()->WriteRecordedPositions();
-  emit(EXT1 | bo | BCCTRX | lk);
+  emit(EXT1 | bo | condition_bit * B16 | BCCTRX | lk);
 }
 
 
 // Pseudo op - branch to link register
-void Assembler::blr() { bclr(BA, LeaveLK); }
+void Assembler::blr() { bclr(BA, 0, LeaveLK); }
 
 
 // Pseudo op - branch to count register -- used for "jump"
-void Assembler::bctr() { bcctr(BA, LeaveLK); }
+void Assembler::bctr() { bcctr(BA, 0, LeaveLK); }
 
 
-void Assembler::bctrl() { bcctr(BA, SetLK); }
+void Assembler::bctrl() { bcctr(BA, 0, SetLK); }
 
 
 void Assembler::bc(int branch_offset, BOfield bo, int condition_bit, LKBit lk) {
@@ -744,6 +734,11 @@ void Assembler::xor_(Register dst, Register src1, Register src2, RCBit rc) {
 
 void Assembler::cntlzw_(Register ra, Register rs, RCBit rc) {
   x_form(EXT2 | CNTLZWX, ra, rs, r0, rc);
+}
+
+
+void Assembler::popcntw(Register ra, Register rs) {
+  emit(EXT2 | POPCNTW | rs.code() * B21 | ra.code() * B16);
 }
 
 

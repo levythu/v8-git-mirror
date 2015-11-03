@@ -5,8 +5,6 @@
 #ifndef V8_ARM64_DISASM_ARM64_H
 #define V8_ARM64_DISASM_ARM64_H
 
-#include "src/v8.h"
-
 #include "src/arm64/decoder-arm64.h"
 #include "src/arm64/instructions-arm64.h"
 #include "src/globals.h"
@@ -87,6 +85,7 @@ class PrintDisassembler: public Disassembler {
 };
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ARM64_DISASM_ARM64_H

@@ -32,7 +32,9 @@ class JSIntrinsicLoweringTest : public GraphTest {
   Reduction Reduce(Node* node, MachineOperatorBuilder::Flags flags =
                                    MachineOperatorBuilder::kNoFlags) {
     MachineOperatorBuilder machine(zone(), kMachPtr, flags);
-    JSGraph jsgraph(isolate(), graph(), common(), javascript(), &machine);
+    SimplifiedOperatorBuilder simplified(zone());
+    JSGraph jsgraph(isolate(), graph(), common(), javascript(), &simplified,
+                    &machine);
     // TODO(titzer): mock the GraphReducer here for better unit testing.
     GraphReducer graph_reducer(zone(), graph());
     JSIntrinsicLowering reducer(&graph_reducer, &jsgraph,
@@ -42,7 +44,8 @@ class JSIntrinsicLoweringTest : public GraphTest {
 
   Node* EmptyFrameState() {
     MachineOperatorBuilder machine(zone());
-    JSGraph jsgraph(isolate(), graph(), common(), javascript(), &machine);
+    JSGraph jsgraph(isolate(), graph(), common(), javascript(), nullptr,
+                    &machine);
     return jsgraph.EmptyFrameState();
   }
 
@@ -122,23 +125,6 @@ TEST_F(JSIntrinsicLoweringTest, InlineIsSmi) {
                        input, context, effect, control));
   ASSERT_TRUE(r.Changed());
   EXPECT_THAT(r.replacement(), IsObjectIsSmi(input));
-}
-
-
-// -----------------------------------------------------------------------------
-// %_IsNonNegativeSmi
-
-
-TEST_F(JSIntrinsicLoweringTest, InlineIsNonNegativeSmi) {
-  Node* const input = Parameter(0);
-  Node* const context = Parameter(1);
-  Node* const effect = graph()->start();
-  Node* const control = graph()->start();
-  Reduction const r = Reduce(graph()->NewNode(
-      javascript()->CallRuntime(Runtime::kInlineIsNonNegativeSmi, 1), input,
-      context, effect, control));
-  ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(), IsObjectIsNonNegativeSmi(input));
 }
 
 
@@ -327,7 +313,7 @@ TEST_F(JSIntrinsicLoweringTest, Likely) {
       graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineLikely, 1),
                        input, context, effect, control);
   Node* const to_boolean =
-      graph()->NewNode(javascript()->ToBoolean(), likely, context);
+      graph()->NewNode(javascript()->ToBoolean(), likely, context, effect);
   Diamond d(graph(), common(), to_boolean);
   graph()->SetEnd(graph()->NewNode(common()->End(1), d.merge));
 
@@ -387,9 +373,8 @@ TEST_F(JSIntrinsicLoweringTest, InlineStringGetLength) {
       javascript()->CallRuntime(Runtime::kInlineStringGetLength, 1), input,
       context, effect, control));
   ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(),
-              IsLoadField(AccessBuilder::ForStringLength(zone()), input, effect,
-                          control));
+  EXPECT_THAT(r.replacement(), IsLoadField(AccessBuilder::ForStringLength(),
+                                           input, effect, control));
 }
 
 
@@ -422,7 +407,7 @@ TEST_F(JSIntrinsicLoweringTest, Unlikely) {
       graph()->NewNode(javascript()->CallRuntime(Runtime::kInlineUnlikely, 1),
                        input, context, effect, control);
   Node* const to_boolean =
-      graph()->NewNode(javascript()->ToBoolean(), unlikely, context);
+      graph()->NewNode(javascript()->ToBoolean(), unlikely, context, effect);
   Diamond d(graph(), common(), to_boolean);
   graph()->SetEnd(graph()->NewNode(common()->End(1), d.merge));
 

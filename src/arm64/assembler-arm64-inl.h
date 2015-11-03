@@ -7,7 +7,7 @@
 
 #include "src/arm64/assembler-arm64.h"
 #include "src/assembler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 
 
 namespace v8 {
@@ -41,7 +41,7 @@ void RelocInfo::set_target_address(Address target,
 }
 
 
-inline unsigned CPURegister::code() const {
+inline int CPURegister::code() const {
   DCHECK(IsValid());
   return reg_code;
 }
@@ -54,12 +54,12 @@ inline CPURegister::RegisterType CPURegister::type() const {
 
 
 inline RegList CPURegister::Bit() const {
-  DCHECK(reg_code < (sizeof(RegList) * kBitsPerByte));
+  DCHECK(static_cast<size_t>(reg_code) < (sizeof(RegList) * kBitsPerByte));
   return IsValid() ? 1UL << reg_code : 0;
 }
 
 
-inline unsigned CPURegister::SizeInBits() const {
+inline int CPURegister::SizeInBits() const {
   DCHECK(IsValid());
   return reg_size;
 }
@@ -665,7 +665,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
   Memory::Address_at(target_pointer_address_at(pc)) = target;
   // Intuitively, we would think it is necessary to always flush the
   // instruction cache after patching a target address in the code as follows:
-  //   CpuFeatures::FlushICache(pc, sizeof(target));
+  //   Assembler::FlushICacheWithoutIsolate(pc, sizeof(target));
   // However, on ARM, an instruction is actually patched in the case of
   // embedded constants of the form:
   // ldr   ip, [pc, #...]
@@ -958,32 +958,6 @@ LoadStorePairOp Assembler::StorePairOpFor(const CPURegister& rt,
   } else {
     DCHECK(rt.IsFPRegister());
     return rt.Is64Bits() ? STP_d : STP_s;
-  }
-}
-
-
-LoadStorePairNonTemporalOp Assembler::LoadPairNonTemporalOpFor(
-    const CPURegister& rt, const CPURegister& rt2) {
-  DCHECK(AreSameSizeAndType(rt, rt2));
-  USE(rt2);
-  if (rt.IsRegister()) {
-    return rt.Is64Bits() ? LDNP_x : LDNP_w;
-  } else {
-    DCHECK(rt.IsFPRegister());
-    return rt.Is64Bits() ? LDNP_d : LDNP_s;
-  }
-}
-
-
-LoadStorePairNonTemporalOp Assembler::StorePairNonTemporalOpFor(
-    const CPURegister& rt, const CPURegister& rt2) {
-  DCHECK(AreSameSizeAndType(rt, rt2));
-  USE(rt2);
-  if (rt.IsRegister()) {
-    return rt.Is64Bits() ? STNP_x : STNP_w;
-  } else {
-    DCHECK(rt.IsFPRegister());
-    return rt.Is64Bits() ? STNP_d : STNP_s;
   }
 }
 
@@ -1285,6 +1259,7 @@ void Assembler::ClearRecordedAstId() {
 }
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ARM64_ASSEMBLER_ARM64_INL_H_

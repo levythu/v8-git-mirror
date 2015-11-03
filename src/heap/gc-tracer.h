@@ -6,6 +6,7 @@
 #define V8_HEAP_GC_TRACER_H_
 
 #include "src/base/platform/platform.h"
+#include "src/globals.h"
 
 namespace v8 {
 namespace internal {
@@ -98,12 +99,25 @@ class GCTracer {
     enum ScopeId {
       EXTERNAL,
       MC_MARK,
+      MC_MARK_FINISH_INCREMENTAL,
+      MC_MARK_PREPARE_CODE_FLUSH,
+      MC_MARK_ROOT,
+      MC_MARK_TOPOPT,
+      MC_MARK_RETAIN_MAPS,
+      MC_MARK_WEAK_CLOSURE,
+      MC_MARK_STRING_TABLE,
+      MC_MARK_WEAK_REFERENCES,
+      MC_MARK_GLOBAL_HANDLES,
+      MC_MARK_CODE_FLUSH,
+      MC_STORE_BUFFER_CLEAR,
+      MC_SLOTS_BUFFER_CLEAR,
       MC_SWEEP,
       MC_SWEEP_NEWSPACE,
       MC_SWEEP_OLDSPACE,
       MC_SWEEP_CODE,
       MC_SWEEP_CELL,
       MC_SWEEP_MAP,
+      MC_SWEEP_ABORTED,
       MC_EVACUATE_PAGES,
       MC_UPDATE_NEW_TO_NEW_POINTERS,
       MC_UPDATE_ROOT_TO_NEW_POINTERS,
@@ -111,11 +125,12 @@ class GCTracer {
       MC_UPDATE_POINTERS_TO_EVACUATED,
       MC_UPDATE_POINTERS_BETWEEN_EVACUATED,
       MC_UPDATE_MISC_POINTERS,
-      MC_INCREMENTAL_WEAKCLOSURE,
-      MC_WEAKCLOSURE,
+      MC_INCREMENTAL_FINALIZE,
       MC_WEAKCOLLECTION_PROCESS,
       MC_WEAKCOLLECTION_CLEAR,
       MC_WEAKCOLLECTION_ABORT,
+      MC_WEAKCELL,
+      MC_NONLIVEREFERENCES,
       MC_FLUSH_CODE,
       SCAVENGER_CODE_FLUSH_CANDIDATES,
       SCAVENGER_OBJECT_GROUPS,
@@ -215,6 +230,9 @@ class GCTracer {
     // Timestamp set in the destructor.
     double end_time;
 
+    // Memory reduction flag set.
+    bool reduce_memory;
+
     // Size of objects in heap set in constructor.
     intptr_t start_object_size;
 
@@ -297,6 +315,8 @@ class GCTracer {
       ContextDisposalEventBuffer;
 
   typedef RingBuffer<SurvivalEvent, kRingBufferMaxSize> SurvivalEventBuffer;
+
+  static const int kThroughputTimeFrameMs = 5000;
 
   explicit GCTracer(Heap* heap);
 
@@ -415,8 +435,13 @@ class GCTracer {
   // Returns 0 if no allocation events have been recorded.
   size_t AllocationThroughputInBytesPerMillisecond(double time_ms) const;
 
-  // Allocation throughput in old generation in bytes/milliseconds in
-  // the last five seconds.
+  // Allocation throughput in heap in bytes/milliseconds in the last
+  // kThroughputTimeFrameMs seconds.
+  // Returns 0 if no allocation events have been recorded.
+  size_t CurrentAllocationThroughputInBytesPerMillisecond() const;
+
+  // Allocation throughput in old generation in bytes/milliseconds in the last
+  // kThroughputTimeFrameMs seconds.
   // Returns 0 if no allocation events have been recorded.
   size_t CurrentOldGenerationAllocationThroughputInBytesPerMillisecond() const;
 
@@ -545,7 +570,7 @@ class GCTracer {
 
   DISALLOW_COPY_AND_ASSIGN(GCTracer);
 };
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_HEAP_GC_TRACER_H_

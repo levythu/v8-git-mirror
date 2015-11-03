@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #if V8_TARGET_ARCH_X64
 
 #include "src/interface-descriptors.h"
@@ -33,31 +31,36 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return rdi; }
 const Register VectorStoreICDescriptor::VectorRegister() { return rbx; }
 
 
+const Register VectorStoreTransitionDescriptor::SlotRegister() { return rdi; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return rbx; }
+const Register VectorStoreTransitionDescriptor::MapRegister() { return r11; }
+
+
 const Register StoreTransitionDescriptor::MapRegister() { return rbx; }
 
 
-const Register LoadGlobalViaContextDescriptor::DepthRegister() { return rdx; }
 const Register LoadGlobalViaContextDescriptor::SlotRegister() { return rbx; }
-const Register LoadGlobalViaContextDescriptor::NameRegister() { return rcx; }
 
 
-const Register StoreGlobalViaContextDescriptor::DepthRegister() { return rdx; }
 const Register StoreGlobalViaContextDescriptor::SlotRegister() { return rbx; }
-const Register StoreGlobalViaContextDescriptor::NameRegister() { return rcx; }
 const Register StoreGlobalViaContextDescriptor::ValueRegister() { return rax; }
 
 
-const Register ElementTransitionAndStoreDescriptor::MapRegister() {
-  return rbx;
-}
+const Register InstanceOfDescriptor::LeftRegister() { return rdx; }
+const Register InstanceOfDescriptor::RightRegister() { return rax; }
 
 
-const Register InstanceofDescriptor::left() { return rax; }
-const Register InstanceofDescriptor::right() { return rdx; }
+const Register StringCompareDescriptor::LeftRegister() { return rdx; }
+const Register StringCompareDescriptor::RightRegister() { return rax; }
 
 
 const Register ArgumentsAccessReadDescriptor::index() { return rdx; }
 const Register ArgumentsAccessReadDescriptor::parameter_count() { return rax; }
+
+
+const Register ArgumentsAccessNewDescriptor::function() { return rdi; }
+const Register ArgumentsAccessNewDescriptor::parameter_count() { return rcx; }
+const Register ArgumentsAccessNewDescriptor::parameter_pointer() { return rdx; }
 
 
 const Register ApiGetterDescriptor::function_address() { return r8; }
@@ -102,6 +105,18 @@ void ToNumberDescriptor::InitializePlatformSpecific(
   Register registers[] = {rax};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+// static
+const Register ToLengthDescriptor::ReceiverRegister() { return rax; }
+
+
+// static
+const Register ToStringDescriptor::ReceiverRegister() { return rax; }
+
+
+// static
+const Register ToObjectDescriptor::ReceiverRegister() { return rax; }
 
 
 void NumberToStringDescriptor::InitializePlatformSpecific(
@@ -181,6 +196,15 @@ void CallConstructDescriptor::InitializePlatformSpecific(
 }
 
 
+void CallTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // rax : number of arguments
+  // rdi : the target to call
+  Register registers[] = {rdi, rax};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
 void RegExpConstructResultDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   Register registers[] = {rcx, rbx, rax};
@@ -198,6 +222,13 @@ void TransitionElementsKindDescriptor::InitializePlatformSpecific(
 void AllocateHeapNumberDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   data->InitializePlatformSpecific(0, nullptr, nullptr);
+}
+
+
+void AllocateInNewSpaceDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {rax};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -362,6 +393,41 @@ void MathRoundVariantCallFromOptimizedCodeDescriptor::
   };
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+void InterpreterPushArgsAndCallDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      rax,  // argument count (not including receiver)
+      rbx,  // address of first argument
+      rdi   // the target callable to be call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterPushArgsAndConstructDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      rax,  // argument count (not including receiver)
+      rdx,  // original constructor
+      rdi,  // constructor
+      rbx,  // address of first argument
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      rax,  // argument count (argc)
+      r15,  // address of first argument (argv)
+      rbx   // the runtime function to call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
 }  // namespace internal
 }  // namespace v8
 

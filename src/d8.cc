@@ -44,16 +44,10 @@
 #include "src/base/platform/platform.h"
 #include "src/base/sys-info.h"
 #include "src/basic-block-profiler.h"
-#include "src/d8-debug.h"
-#include "src/debug.h"
 #include "src/snapshot/natives.h"
 #include "src/utils.h"
 #include "src/v8.h"
 #endif  // !V8_SHARED
-
-#ifdef V8_USE_EXTERNAL_STARTUP_DATA
-#include "src/startup-data-util.h"
-#endif  // V8_USE_EXTERNAL_STARTUP_DATA
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>  // NOLINT
@@ -77,6 +71,9 @@ namespace v8 {
 namespace {
 
 const int MB = 1024 * 1024;
+#ifndef V8_SHARED
+const int kMaxWorkers = 50;
+#endif
 
 
 class ShellArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
@@ -107,6 +104,13 @@ class MockArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 v8::Platform* g_platform = NULL;
 
 
+static Local<Value> Throw(Isolate* isolate, const char* message) {
+  return isolate->ThrowException(
+      String::NewFromUtf8(isolate, message, NewStringType::kNormal)
+          .ToLocalChecked());
+}
+
+
 #ifndef V8_SHARED
 bool FindInObjectList(Local<Object> object, const Shell::ObjectList& list) {
   for (int i = 0; i < list.length(); ++i) {
@@ -116,18 +120,27 @@ bool FindInObjectList(Local<Object> object, const Shell::ObjectList& list) {
   }
   return false;
 }
+
+
+Worker* GetWorkerFromInternalField(Isolate* isolate, Local<Object> object) {
+  if (object->InternalFieldCount() != 1) {
+    Throw(isolate, "this is not a Worker");
+    return NULL;
+  }
+
+  Worker* worker =
+      static_cast<Worker*>(object->GetAlignedPointerFromInternalField(0));
+  if (worker == NULL) {
+    Throw(isolate, "Worker is defunct because main thread is terminating");
+    return NULL;
+  }
+
+  return worker;
+}
 #endif  // !V8_SHARED
 
 
 }  // namespace
-
-
-static Local<Value> Throw(Isolate* isolate, const char* message) {
-  return isolate->ThrowException(
-      String::NewFromUtf8(isolate, message, NewStringType::kNormal)
-          .ToLocalChecked());
-}
-
 
 
 class PerIsolateData {
@@ -169,37 +182,6 @@ class PerIsolateData {
 };
 
 
-LineEditor *LineEditor::current_ = NULL;
-
-
-LineEditor::LineEditor(Type type, const char* name)
-    : type_(type), name_(name) {
-  if (current_ == NULL || current_->type_ < type) current_ = this;
-}
-
-
-class DumbLineEditor: public LineEditor {
- public:
-  explicit DumbLineEditor(Isolate* isolate)
-      : LineEditor(LineEditor::DUMB, "dumb"), isolate_(isolate) { }
-  virtual Local<String> Prompt(const char* prompt);
-
- private:
-  Isolate* isolate_;
-};
-
-
-Local<String> DumbLineEditor::Prompt(const char* prompt) {
-  printf("%s", prompt);
-#if defined(__native_client__)
-  // Native Client libc is used to being embedded in Chrome and
-  // has trouble recognizing when to flush.
-  fflush(stdout);
-#endif
-  return Shell::ReadFromStdin(isolate_);
-}
-
-
 #ifndef V8_SHARED
 CounterMap* Shell::counter_map_;
 base::OS::MemoryMappedFile* Shell::counters_file_ = NULL;
@@ -218,7 +200,6 @@ i::List<SharedArrayBuffer::Contents> Shell::externalized_shared_contents_;
 Global<Context> Shell::evaluation_context_;
 ArrayBuffer::Allocator* Shell::array_buffer_allocator;
 ShellOptions Shell::options;
-const char* Shell::kPrompt = "d8> ";
 base::OnceType Shell::quit_once_ = V8_ONCE_INIT;
 
 #ifndef V8_SHARED
@@ -328,18 +309,8 @@ MaybeLocal<Script> Shell::CompileString(
 bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
                           Local<Value> name, bool print_result,
                           bool report_exceptions, SourceType source_type) {
-#ifndef V8_SHARED
-  bool FLAG_debugger = i::FLAG_debugger;
-#else
-  bool FLAG_debugger = false;
-#endif  // !V8_SHARED
   HandleScope handle_scope(isolate);
   TryCatch try_catch(isolate);
-  options.script_executed = true;
-  if (FLAG_debugger) {
-    // When debugging make exceptions appear to be uncaught.
-    try_catch.SetVerbose(true);
-  }
 
   MaybeLocal<Value> maybe_result;
   {
@@ -351,8 +322,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
     if (!Shell::CompileString(isolate, source, name, options.compile_options,
                               source_type).ToLocal(&script)) {
       // Print errors that happened during compilation.
-      if (report_exceptions && !FLAG_debugger)
-        ReportException(isolate, &try_catch);
+      if (report_exceptions) ReportException(isolate, &try_catch);
       return false;
     }
     maybe_result = script->Run(realm);
@@ -363,8 +333,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
   if (!maybe_result.ToLocal(&result)) {
     DCHECK(try_catch.HasCaught());
     // Print errors that happened during execution.
-    if (report_exceptions && !FLAG_debugger)
-      ReportException(isolate, &try_catch);
+    if (report_exceptions) ReportException(isolate, &try_catch);
     return false;
   }
   DCHECK(!try_catch.HasCaught());
@@ -729,12 +698,27 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
+  if (!args.IsConstructCall()) {
+    Throw(args.GetIsolate(), "Worker must be constructed with new");
+    return;
+  }
+
   {
     base::LockGuard<base::Mutex> lock_guard(workers_mutex_.Pointer());
+    if (workers_.length() >= kMaxWorkers) {
+      Throw(args.GetIsolate(), "Too many workers, I won't let you create more");
+      return;
+    }
+
+    // Initialize the internal field to NULL; if we return early without
+    // creating a new Worker (because the main thread is terminating) we can
+    // early-out from the instance calls.
+    args.Holder()->SetAlignedPointerInInternalField(0, NULL);
+
     if (!allow_new_workers_) return;
 
     Worker* worker = new Worker;
-    args.This()->SetInternalField(0, External::New(isolate, worker));
+    args.Holder()->SetAlignedPointerInInternalField(0, worker);
     workers_.Add(worker);
 
     String::Utf8Value script(args[0]);
@@ -742,7 +726,7 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& args) {
       Throw(args.GetIsolate(), "Can't get worker script");
       return;
     }
-    worker->StartExecuteInThread(isolate, *script);
+    worker->StartExecuteInThread(*script);
   }
 }
 
@@ -751,23 +735,16 @@ void Shell::WorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope handle_scope(isolate);
   Local<Context> context = isolate->GetCurrentContext();
-  Local<Value> this_value;
 
   if (args.Length() < 1) {
     Throw(isolate, "Invalid argument");
     return;
   }
 
-  if (args.This()->InternalFieldCount() > 0) {
-    this_value = args.This()->GetInternalField(0);
-  }
-  if (this_value.IsEmpty()) {
-    Throw(isolate, "this is not a Worker");
+  Worker* worker = GetWorkerFromInternalField(isolate, args.Holder());
+  if (!worker) {
     return;
   }
-
-  Worker* worker =
-      static_cast<Worker*>(Local<External>::Cast(this_value)->Value());
 
   Local<Value> message = args[0];
   ObjectList to_transfer;
@@ -807,17 +784,10 @@ void Shell::WorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args) {
 void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope handle_scope(isolate);
-  Local<Value> this_value;
-  if (args.This()->InternalFieldCount() > 0) {
-    this_value = args.This()->GetInternalField(0);
-  }
-  if (this_value.IsEmpty()) {
-    Throw(isolate, "this is not a Worker");
+  Worker* worker = GetWorkerFromInternalField(isolate, args.Holder());
+  if (!worker) {
     return;
   }
-
-  Worker* worker =
-      static_cast<Worker*>(Local<External>::Cast(this_value)->Value());
 
   SerializationData* data = worker->GetMessage();
   if (data) {
@@ -834,17 +804,11 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& args) {
 void Shell::WorkerTerminate(const v8::FunctionCallbackInfo<v8::Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope handle_scope(isolate);
-  Local<Value> this_value;
-  if (args.This()->InternalFieldCount() > 0) {
-    this_value = args.This()->GetInternalField(0);
-  }
-  if (this_value.IsEmpty()) {
-    Throw(isolate, "this is not a Worker");
+  Worker* worker = GetWorkerFromInternalField(isolate, args.Holder());
+  if (!worker) {
     return;
   }
 
-  Worker* worker =
-      static_cast<Worker*>(Local<External>::Cast(this_value)->Value());
   worker->Terminate();
 }
 #endif  // !V8_SHARED
@@ -858,7 +822,7 @@ void Shell::QuitOnce(v8::FunctionCallbackInfo<v8::Value>* args) {
   CleanupWorkers();
 #endif  // !V8_SHARED
   OnExit(args->GetIsolate());
-  exit(exit_code);
+  Exit(exit_code);
 }
 
 
@@ -932,69 +896,6 @@ void Shell::ReportException(Isolate* isolate, v8::TryCatch* try_catch) {
 
 
 #ifndef V8_SHARED
-Local<Array> Shell::GetCompletions(Isolate* isolate, Local<String> text,
-                                   Local<String> full) {
-  EscapableHandleScope handle_scope(isolate);
-  v8::Local<v8::Context> utility_context =
-      v8::Local<v8::Context>::New(isolate, utility_context_);
-  v8::Context::Scope context_scope(utility_context);
-  Local<Object> global = utility_context->Global();
-  Local<Value> fun = global->Get(utility_context,
-                                 String::NewFromUtf8(isolate, "GetCompletions",
-                                                     NewStringType::kNormal)
-                                     .ToLocalChecked()).ToLocalChecked();
-  static const int kArgc = 3;
-  v8::Local<v8::Context> evaluation_context =
-      v8::Local<v8::Context>::New(isolate, evaluation_context_);
-  Local<Value> argv[kArgc] = {evaluation_context->Global(), text, full};
-  Local<Value> val = Local<Function>::Cast(fun)
-                         ->Call(utility_context, global, kArgc, argv)
-                         .ToLocalChecked();
-  return handle_scope.Escape(Local<Array>::Cast(val));
-}
-
-
-Local<Object> Shell::DebugMessageDetails(Isolate* isolate,
-                                         Local<String> message) {
-  EscapableHandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context =
-      v8::Local<v8::Context>::New(isolate, utility_context_);
-  v8::Context::Scope context_scope(context);
-  Local<Object> global = context->Global();
-  Local<Value> fun =
-      global->Get(context, String::NewFromUtf8(isolate, "DebugMessageDetails",
-                                               NewStringType::kNormal)
-                               .ToLocalChecked()).ToLocalChecked();
-  static const int kArgc = 1;
-  Local<Value> argv[kArgc] = {message};
-  Local<Value> val = Local<Function>::Cast(fun)
-                         ->Call(context, global, kArgc, argv)
-                         .ToLocalChecked();
-  return handle_scope.Escape(Local<Object>(Local<Object>::Cast(val)));
-}
-
-
-Local<Value> Shell::DebugCommandToJSONRequest(Isolate* isolate,
-                                              Local<String> command) {
-  EscapableHandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context =
-      v8::Local<v8::Context>::New(isolate, utility_context_);
-  v8::Context::Scope context_scope(context);
-  Local<Object> global = context->Global();
-  Local<Value> fun =
-      global->Get(context,
-                  String::NewFromUtf8(isolate, "DebugCommandToJSONRequest",
-                                      NewStringType::kNormal).ToLocalChecked())
-          .ToLocalChecked();
-  static const int kArgc = 1;
-  Local<Value> argv[kArgc] = {command};
-  Local<Value> val = Local<Function>::Cast(fun)
-                         ->Call(context, global, kArgc, argv)
-                         .ToLocalChecked();
-  return handle_scope.Escape(Local<Value>(val));
-}
-
-
 int32_t* Counter::Bind(const char* name, bool is_histogram) {
   int i;
   for (i = 0; i < kMaxNameSize - 1 && name[i]; i++)
@@ -1110,6 +1011,8 @@ void Shell::InstallUtilityScript(Isolate* isolate) {
   HandleScope scope(isolate);
   // If we use the utility context, we have to set the security tokens so that
   // utility, evaluation and debug context can all access each other.
+  Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
+  utility_context_.Reset(isolate, Context::New(isolate, NULL, global_template));
   v8::Local<v8::Context> utility_context =
       v8::Local<v8::Context>::New(isolate, utility_context_);
   v8::Local<v8::Context> evaluation_context =
@@ -1117,22 +1020,6 @@ void Shell::InstallUtilityScript(Isolate* isolate) {
   utility_context->SetSecurityToken(Undefined(isolate));
   evaluation_context->SetSecurityToken(Undefined(isolate));
   v8::Context::Scope context_scope(utility_context);
-
-  if (i::FLAG_debugger) printf("JavaScript debugger enabled\n");
-  // Install the debugger object in the utility scope
-  i::Debug* debug = reinterpret_cast<i::Isolate*>(isolate)->debug();
-  debug->Load();
-  i::Handle<i::Context> debug_context = debug->debug_context();
-  i::Handle<i::JSObject> js_debug
-      = i::Handle<i::JSObject>(debug_context->global_object());
-  utility_context->Global()
-      ->Set(utility_context,
-            String::NewFromUtf8(isolate, "$debug", NewStringType::kNormal)
-                .ToLocalChecked(),
-            Utils::ToLocal(js_debug))
-      .FromJust();
-  debug_context->set_security_token(
-      reinterpret_cast<i::Isolate*>(isolate)->heap()->undefined_value());
 
   // Run the d8 shell utility script in the utility context
   int source_index = i::NativesCollection<i::D8>::GetIndex("d8");
@@ -1159,10 +1046,7 @@ void Shell::InstallUtilityScript(Isolate* isolate) {
           i::JSFunction::cast(*compiled_script)->shared()->script()))
       : i::Handle<i::Script>(i::Script::cast(
           i::SharedFunctionInfo::cast(*compiled_script)->script()));
-  script_object->set_type(i::Smi::FromInt(i::Script::TYPE_NATIVE));
-
-  // Start the in-process debugger if requested.
-  if (i::FLAG_debugger) v8::Debug::SetDebugEventListener(HandleDebugEvent);
+  script_object->set_type(i::Script::TYPE_NATIVE);
 }
 #endif  // !V8_SHARED
 
@@ -1259,18 +1143,27 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
 
   Local<FunctionTemplate> worker_fun_template =
       FunctionTemplate::New(isolate, WorkerNew);
+  Local<Signature> worker_signature =
+      Signature::New(isolate, worker_fun_template);
+  worker_fun_template->SetClassName(
+      String::NewFromUtf8(isolate, "Worker", NewStringType::kNormal)
+          .ToLocalChecked());
+  worker_fun_template->ReadOnlyPrototype();
   worker_fun_template->PrototypeTemplate()->Set(
       String::NewFromUtf8(isolate, "terminate", NewStringType::kNormal)
           .ToLocalChecked(),
-      FunctionTemplate::New(isolate, WorkerTerminate));
+      FunctionTemplate::New(isolate, WorkerTerminate, Local<Value>(),
+                            worker_signature));
   worker_fun_template->PrototypeTemplate()->Set(
       String::NewFromUtf8(isolate, "postMessage", NewStringType::kNormal)
           .ToLocalChecked(),
-      FunctionTemplate::New(isolate, WorkerPostMessage));
+      FunctionTemplate::New(isolate, WorkerPostMessage, Local<Value>(),
+                            worker_signature));
   worker_fun_template->PrototypeTemplate()->Set(
       String::NewFromUtf8(isolate, "getMessage", NewStringType::kNormal)
           .ToLocalChecked(),
-      FunctionTemplate::New(isolate, WorkerGetMessage));
+      FunctionTemplate::New(isolate, WorkerGetMessage, Local<Value>(),
+                            worker_signature));
   worker_fun_template->InstanceTemplate()->SetInternalFieldCount(1);
   global_template->Set(
       String::NewFromUtf8(isolate, "Worker", NewStringType::kNormal)
@@ -1294,21 +1187,6 @@ void Shell::Initialize(Isolate* isolate) {
   // Set up counters
   if (i::StrLength(i::FLAG_map_counters) != 0)
     MapCounters(isolate, i::FLAG_map_counters);
-#endif  // !V8_SHARED
-}
-
-
-void Shell::InitializeDebugger(Isolate* isolate) {
-  if (options.test_shell) return;
-#ifndef V8_SHARED
-  HandleScope scope(isolate);
-  Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
-  utility_context_.Reset(isolate,
-                         Context::New(isolate, NULL, global_template));
-  if (utility_context_.IsEmpty()) {
-    printf("Failed to initialize debugger\n");
-    Shell::Exit(1);
-  }
 #endif  // !V8_SHARED
 }
 
@@ -1371,8 +1249,6 @@ inline bool operator<(const CounterAndKey& lhs, const CounterAndKey& rhs) {
 
 
 void Shell::OnExit(v8::Isolate* isolate) {
-  LineEditor* line_editor = LineEditor::Get();
-  if (line_editor) line_editor->Close();
 #ifndef V8_SHARED
   reinterpret_cast<i::Isolate*>(isolate)->DumpAndResetCompilationStats();
   if (i::FLAG_dump_counters) {
@@ -1530,12 +1406,16 @@ void Shell::RunShell(Isolate* isolate) {
   Local<String> name =
       String::NewFromUtf8(isolate, "(d8)", NewStringType::kNormal)
           .ToLocalChecked();
-  LineEditor* console = LineEditor::Get();
-  printf("V8 version %s [console: %s]\n", V8::GetVersion(), console->name());
-  console->Open(isolate);
+  printf("V8 version %s\n", V8::GetVersion());
   while (true) {
     HandleScope inner_scope(isolate);
-    Local<String> input = console->Prompt(Shell::kPrompt);
+    printf("d8> ");
+#if defined(__native_client__)
+    // Native Client libc is used to being embedded in Chrome and
+    // has trouble recognizing when to flush.
+    fflush(stdout);
+#endif
+    Local<String> input = Shell::ReadFromStdin(isolate);
     if (input.IsEmpty()) break;
     ExecuteString(isolate, input, name, true, true);
   }
@@ -1565,6 +1445,7 @@ void SourceGroup::Execute(Isolate* isolate) {
       Local<String> source =
           String::NewFromUtf8(isolate, argv_[i + 1], NewStringType::kNormal)
               .ToLocalChecked();
+      Shell::options.script_executed = true;
       if (!Shell::ExecuteString(isolate, source, file_name, false, true)) {
         exception_was_thrown = true;
         break;
@@ -1590,6 +1471,7 @@ void SourceGroup::Execute(Isolate* isolate) {
       printf("Error reading '%s'\n", arg);
       Shell::Exit(1);
     }
+    Shell::options.script_executed = true;
     if (!Shell::ExecuteString(isolate, source, file_name, false, true,
                               source_type)) {
       exception_was_thrown = true;
@@ -1628,7 +1510,7 @@ void SourceGroup::ExecuteInThread() {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
   Isolate* isolate = Isolate::New(create_params);
-  do {
+  for (int i = 0; i < Shell::options.stress_runs; ++i) {
     next_semaphore_.Wait();
     {
       Isolate::Scope iscope(isolate);
@@ -1645,7 +1527,7 @@ void SourceGroup::ExecuteInThread() {
       Shell::CollectGarbage(isolate);
     }
     done_semaphore_.Signal();
-  } while (!Shell::options.last_run);
+  }
 
   isolate->Dispose();
 }
@@ -1662,11 +1544,13 @@ void SourceGroup::StartExecuteInThread() {
 
 void SourceGroup::WaitForThread() {
   if (thread_ == NULL) return;
-  if (Shell::options.last_run) {
-    thread_->Join();
-  } else {
-    done_semaphore_.Wait();
-  }
+  done_semaphore_.Wait();
+}
+
+
+void SourceGroup::JoinThread() {
+  if (thread_ == NULL) return;
+  thread_->Join();
 }
 
 
@@ -1782,8 +1666,7 @@ Worker::Worker()
       out_semaphore_(0),
       thread_(NULL),
       script_(NULL),
-      state_(IDLE),
-      join_called_(false) {}
+      running_(false) {}
 
 
 Worker::~Worker() {
@@ -1796,15 +1679,11 @@ Worker::~Worker() {
 }
 
 
-void Worker::StartExecuteInThread(Isolate* isolate, const char* script) {
-  if (base::NoBarrier_CompareAndSwap(&state_, IDLE, RUNNING) == IDLE) {
-    script_ = i::StrDup(script);
-    thread_ = new WorkerThread(this);
-    thread_->Start();
-  } else {
-    // Somehow the Worker was started twice.
-    UNREACHABLE();
-  }
+void Worker::StartExecuteInThread(const char* script) {
+  running_ = true;
+  script_ = i::StrDup(script);
+  thread_ = new WorkerThread(this);
+  thread_->Start();
 }
 
 
@@ -1819,7 +1698,7 @@ SerializationData* Worker::GetMessage() {
   while (!out_queue_.Dequeue(&data)) {
     // If the worker is no longer running, and there are no messages in the
     // queue, don't expect any more messages from it.
-    if (base::NoBarrier_Load(&state_) != RUNNING) break;
+    if (!base::NoBarrier_Load(&running_)) break;
     out_semaphore_.Wait();
   }
   return data;
@@ -1827,23 +1706,16 @@ SerializationData* Worker::GetMessage() {
 
 
 void Worker::Terminate() {
-  if (base::NoBarrier_CompareAndSwap(&state_, RUNNING, TERMINATED) == RUNNING) {
-    // Post NULL to wake the Worker thread message loop, and tell it to stop
-    // running.
-    PostMessage(NULL);
-  }
+  base::NoBarrier_Store(&running_, false);
+  // Post NULL to wake the Worker thread message loop, and tell it to stop
+  // running.
+  PostMessage(NULL);
 }
 
 
 void Worker::WaitForThread() {
   Terminate();
-
-  if (base::NoBarrier_CompareAndSwap(&join_called_, false, true) == false) {
-    thread_->Join();
-  } else {
-    // Tried to call join twice.
-    UNREACHABLE();
-  }
+  thread_->Join();
 }
 
 
@@ -2027,9 +1899,6 @@ bool Shell::SetOptions(int argc, char* argv[]) {
     } else if (strcmp(argv[i], "--dump-counters") == 0) {
       printf("D8 with shared library does not include counters\n");
       return false;
-    } else if (strcmp(argv[i], "--debugger") == 0) {
-      printf("Javascript debugger not included\n");
-      return false;
 #endif  // V8_SHARED
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
     } else if (strncmp(argv[i], "--natives_blob=", 15) == 0) {
@@ -2075,6 +1944,11 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       enable_harmony_modules = true;
     } else if (strncmp(argv[i], "--", 2) == 0) {
       printf("Warning: unknown flag %s.\nTry --help for options\n", argv[i]);
+    } else if (strcmp(str, "-e") == 0 && i + 1 < argc) {
+      options.script_executed = true;
+    } else if (strncmp(str, "-", 1) != 0) {
+      // Not a flag, so it must be a script to execute.
+      options.script_executed = true;
     }
   }
   current->End(argc);
@@ -2091,7 +1965,7 @@ bool Shell::SetOptions(int argc, char* argv[]) {
 }
 
 
-int Shell::RunMain(Isolate* isolate, int argc, char* argv[]) {
+int Shell::RunMain(Isolate* isolate, int argc, char* argv[], bool last_run) {
 #ifndef V8_SHARED
   for (int i = 1; i < options.num_isolates; ++i) {
     options.isolate_sources[i].StartExecuteInThread();
@@ -2100,16 +1974,9 @@ int Shell::RunMain(Isolate* isolate, int argc, char* argv[]) {
   {
     HandleScope scope(isolate);
     Local<Context> context = CreateEvaluationContext(isolate);
-    if (options.last_run && options.use_interactive_shell()) {
+    if (last_run && options.use_interactive_shell()) {
       // Keep using the same context in the interactive shell.
       evaluation_context_.Reset(isolate, context);
-#ifndef V8_SHARED
-      // If the interactive debugger is enabled make sure to activate
-      // it before running the files passed on the command line.
-      if (i::FLAG_debugger) {
-        InstallUtilityScript(isolate);
-      }
-#endif  // !V8_SHARED
     }
     {
       Context::Scope cscope(context);
@@ -2120,7 +1987,11 @@ int Shell::RunMain(Isolate* isolate, int argc, char* argv[]) {
   CollectGarbage(isolate);
 #ifndef V8_SHARED
   for (int i = 1; i < options.num_isolates; ++i) {
-    options.isolate_sources[i].WaitForThread();
+    if (last_run) {
+      options.isolate_sources[i].JoinThread();
+    } else {
+      options.isolate_sources[i].WaitForThread();
+    }
   }
   CleanupWorkers();
 #endif  // !V8_SHARED
@@ -2218,16 +2089,15 @@ bool Shell::SerializeValue(Isolate* isolate, Local<Value> value,
     } else {
       ArrayBuffer::Contents contents = array_buffer->GetContents();
       // Clone ArrayBuffer
-      if (contents.ByteLength() > i::kMaxUInt32) {
+      if (contents.ByteLength() > i::kMaxInt) {
         Throw(isolate, "ArrayBuffer is too big to clone");
         return false;
       }
 
-      int byte_length = static_cast<int>(contents.ByteLength());
+      int32_t byte_length = static_cast<int32_t>(contents.ByteLength());
       out_data->WriteTag(kSerializationTagArrayBuffer);
       out_data->Write(byte_length);
-      out_data->WriteMemory(contents.Data(),
-                            static_cast<int>(contents.ByteLength()));
+      out_data->WriteMemory(contents.Data(), byte_length);
     }
   } else if (value->IsSharedArrayBuffer()) {
     Local<SharedArrayBuffer> sab = Local<SharedArrayBuffer>::Cast(value);
@@ -2246,6 +2116,7 @@ bool Shell::SerializeValue(Isolate* isolate, Local<Value> value,
       contents = sab->GetContents();
     } else {
       contents = sab->Externalize();
+      base::LockGuard<base::Mutex> lock_guard(workers_mutex_.Pointer());
       externalized_shared_contents_.Add(contents);
     }
     out_data->WriteSharedArrayBufferContents(contents);
@@ -2352,7 +2223,7 @@ MaybeLocal<Value> Shell::DeserializeValue(Isolate* isolate,
       break;
     }
     case kSerializationTagArrayBuffer: {
-      int byte_length = data.Read<int>(offset);
+      int32_t byte_length = data.Read<int32_t>(offset);
       Local<ArrayBuffer> array_buffer = ArrayBuffer::New(isolate, byte_length);
       ArrayBuffer::Contents contents = array_buffer->GetContents();
       DCHECK(static_cast<size_t>(byte_length) == contents.ByteLength());
@@ -2401,10 +2272,8 @@ void Shell::CleanupWorkers() {
   }
 
   // Now that all workers are terminated, we can re-enable Worker creation.
-  {
-    base::LockGuard<base::Mutex> lock_guard(workers_mutex_.Pointer());
-    allow_new_workers_ = true;
-  }
+  base::LockGuard<base::Mutex> lock_guard(workers_mutex_.Pointer());
+  allow_new_workers_ = true;
 
   for (int i = 0; i < externalized_shared_contents_.length(); ++i) {
     const SharedArrayBuffer::Contents& contents =
@@ -2492,10 +2361,12 @@ int Shell::Main(int argc, char* argv[]) {
   g_platform = v8::platform::CreateDefaultPlatform();
   v8::V8::InitializePlatform(g_platform);
   v8::V8::Initialize();
-#ifdef V8_USE_EXTERNAL_STARTUP_DATA
-  v8::StartupDataHandler startup_data(argv[0], options.natives_blob,
-                                      options.snapshot_blob);
-#endif
+  if (options.natives_blob || options.snapshot_blob) {
+    v8::V8::InitializeExternalStartupData(options.natives_blob,
+                                          options.snapshot_blob);
+  } else {
+    v8::V8::InitializeExternalStartupData(argv[0]);
+  }
   SetFlagsFromString("--trace-hydrogen-file=hydrogen.cfg");
   SetFlagsFromString("--trace-turbo-cfg-file=turbo.cfg");
   SetFlagsFromString("--redirect-code-traces-to=code.asm");
@@ -2530,12 +2401,10 @@ int Shell::Main(int argc, char* argv[]) {
   }
 #endif
   Isolate* isolate = Isolate::New(create_params);
-  DumbLineEditor dumb_line_editor(isolate);
   {
     Isolate::Scope scope(isolate);
     Initialize(isolate);
     PerIsolateData data(isolate);
-    InitializeDebugger(isolate);
 
 #ifndef V8_SHARED
     if (options.dump_heap_constants) {
@@ -2548,35 +2417,36 @@ int Shell::Main(int argc, char* argv[]) {
       Testing::SetStressRunType(options.stress_opt
                                 ? Testing::kStressTypeOpt
                                 : Testing::kStressTypeDeopt);
-      int stress_runs = Testing::GetStressRuns();
-      for (int i = 0; i < stress_runs && result == 0; i++) {
-        printf("============ Stress %d/%d ============\n", i + 1, stress_runs);
+      options.stress_runs = Testing::GetStressRuns();
+      for (int i = 0; i < options.stress_runs && result == 0; i++) {
+        printf("============ Stress %d/%d ============\n", i + 1,
+               options.stress_runs);
         Testing::PrepareStressRun(i);
-        options.last_run = (i == stress_runs - 1);
-        result = RunMain(isolate, argc, argv);
+        bool last_run = i == options.stress_runs - 1;
+        result = RunMain(isolate, argc, argv, last_run);
       }
       printf("======== Full Deoptimization =======\n");
       Testing::DeoptimizeAll();
 #if !defined(V8_SHARED)
     } else if (i::FLAG_stress_runs > 0) {
-      int stress_runs = i::FLAG_stress_runs;
-      for (int i = 0; i < stress_runs && result == 0; i++) {
-        printf("============ Run %d/%d ============\n", i + 1, stress_runs);
-        options.last_run = (i == stress_runs - 1);
-        result = RunMain(isolate, argc, argv);
+      options.stress_runs = i::FLAG_stress_runs;
+      for (int i = 0; i < options.stress_runs && result == 0; i++) {
+        printf("============ Run %d/%d ============\n", i + 1,
+               options.stress_runs);
+        bool last_run = i == options.stress_runs - 1;
+        result = RunMain(isolate, argc, argv, last_run);
       }
 #endif
     } else {
-      result = RunMain(isolate, argc, argv);
+      bool last_run = true;
+      result = RunMain(isolate, argc, argv, last_run);
     }
 
     // Run interactive shell if explicitly requested or if no script has been
     // executed, but never on --test
     if (options.use_interactive_shell()) {
 #ifndef V8_SHARED
-      if (!i::FLAG_debugger) {
-        InstallUtilityScript(isolate);
-      }
+      InstallUtilityScript(isolate);
 #endif  // !V8_SHARED
       RunShell(isolate);
     }

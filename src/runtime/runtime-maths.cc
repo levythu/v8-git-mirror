@@ -2,14 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/runtime/runtime-utils.h"
 
 #include "src/arguments.h"
 #include "src/assembler.h"
+#include "src/base/utils/random-number-generator.h"
 #include "src/codegen.h"
-#include "src/runtime/runtime-utils.h"
 #include "src/third_party/fdlibm/fdlibm.h"
-
 
 namespace v8 {
 namespace internal {
@@ -135,7 +134,7 @@ RUNTIME_FUNCTION(Runtime_MathFloor) {
 
 // Slow version of Math.pow.  We check for fast paths for special cases.
 // Used if VFP3 is not available.
-RUNTIME_FUNCTION(Runtime_MathPowSlow) {
+RUNTIME_FUNCTION(Runtime_MathPow) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 2);
   isolate->counters()->math_pow()->Increment();
@@ -238,12 +237,6 @@ RUNTIME_FUNCTION(Runtime_MathFround) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_MathPow) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_MathPowSlow(args, isolate);
-}
-
-
 RUNTIME_FUNCTION(Runtime_IsMinusZero) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 1);
@@ -251,6 +244,21 @@ RUNTIME_FUNCTION(Runtime_IsMinusZero) {
   if (!obj->IsHeapNumber()) return isolate->heap()->false_value();
   HeapNumber* number = HeapNumber::cast(obj);
   return isolate->heap()->ToBoolean(IsMinusZero(number->value()));
+}
+
+
+RUNTIME_FUNCTION(Runtime_InitializeRNG) {
+  HandleScope scope(isolate);
+  DCHECK(args.length() == 0);
+  static const int kSize = 4;
+  Handle<FixedArray> array = isolate->factory()->NewFixedArray(kSize);
+  uint16_t seeds[kSize];
+  do {
+    isolate->random_number_generator()->NextBytes(seeds,
+                                                  kSize * sizeof(*seeds));
+  } while (!(seeds[0] && seeds[1] && seeds[2] && seeds[3]));
+  for (int i = 0; i < kSize; i++) array->set(i, Smi::FromInt(seeds[i]));
+  return *isolate->factory()->NewJSArrayWithElements(array);
 }
 }  // namespace internal
 }  // namespace v8

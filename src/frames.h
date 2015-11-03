@@ -99,16 +99,17 @@ class StackHandler BASE_EMBEDDED {
 
 
 #define STACK_FRAME_TYPE_LIST(V)                         \
-  V(ENTRY,                   EntryFrame)                 \
-  V(ENTRY_CONSTRUCT,         EntryConstructFrame)        \
-  V(EXIT,                    ExitFrame)                  \
-  V(JAVA_SCRIPT,             JavaScriptFrame)            \
-  V(OPTIMIZED,               OptimizedFrame)             \
-  V(STUB,                    StubFrame)                  \
+  V(ENTRY, EntryFrame)                                   \
+  V(ENTRY_CONSTRUCT, EntryConstructFrame)                \
+  V(EXIT, ExitFrame)                                     \
+  V(JAVA_SCRIPT, JavaScriptFrame)                        \
+  V(OPTIMIZED, OptimizedFrame)                           \
+  V(INTERPRETED, InterpretedFrame)                       \
+  V(STUB, StubFrame)                                     \
   V(STUB_FAILURE_TRAMPOLINE, StubFailureTrampolineFrame) \
-  V(INTERNAL,                InternalFrame)              \
-  V(CONSTRUCT,               ConstructFrame)             \
-  V(ARGUMENTS_ADAPTOR,       ArgumentsAdaptorFrame)
+  V(INTERNAL, InternalFrame)                             \
+  V(CONSTRUCT, ConstructFrame)                           \
+  V(ARGUMENTS_ADAPTOR, ArgumentsAdaptorFrame)
 
 
 class StandardFrameConstants : public AllStatic {
@@ -120,8 +121,13 @@ class StandardFrameConstants : public AllStatic {
   static const int kCPSlotSize =
       FLAG_enable_embedded_constant_pool ? kPointerSize : 0;
   static const int kFixedFrameSizeFromFp =  2 * kPointerSize + kCPSlotSize;
+  static const int kFixedFrameSizeAboveFp = kPCOnStackSize + kFPOnStackSize;
   static const int kFixedFrameSize =
-      kPCOnStackSize + kFPOnStackSize + kFixedFrameSizeFromFp;
+      kFixedFrameSizeAboveFp + kFixedFrameSizeFromFp;
+  static const int kFixedSlotCountAboveFp =
+      kFixedFrameSizeAboveFp / kPointerSize;
+  static const int kFixedSlotCount = kFixedFrameSize / kPointerSize;
+  static const int kCPSlotCount = kCPSlotSize / kPointerSize;
   static const int kExpressionsOffset = -3 * kPointerSize - kCPSlotSize;
   static const int kMarkerOffset = -2 * kPointerSize - kCPSlotSize;
   static const int kContextOffset = -1 * kPointerSize - kCPSlotSize;
@@ -167,6 +173,16 @@ class ConstructFrameConstants : public AllStatic {
 
   static const int kFrameSize =
       StandardFrameConstants::kFixedFrameSize + 5 * kPointerSize;
+};
+
+
+class InterpreterFrameConstants : public AllStatic {
+ public:
+  // Register file pointer relative.
+  static const int kLastParamFromRegisterPointer =
+      StandardFrameConstants::kFixedFrameSize + kPointerSize;
+  static const int kFunctionFromRegisterPointer = kPointerSize;
+  static const int kContextFromRegisterPointer = 2 * kPointerSize;
 };
 
 
@@ -232,7 +248,8 @@ class StackFrame BASE_EMBEDDED {
 
   bool is_java_script() const {
     Type type = this->type();
-    return (type == JAVA_SCRIPT) || (type == OPTIMIZED);
+    return (type == JAVA_SCRIPT) || (type == OPTIMIZED) ||
+           (type == INTERPRETED);
   }
 
   // Accessors.
@@ -510,16 +527,9 @@ class StandardFrame: public StackFrame {
 
 class FrameSummary BASE_EMBEDDED {
  public:
-  FrameSummary(Object* receiver,
-               JSFunction* function,
-               Code* code,
-               int offset,
-               bool is_constructor)
-      : receiver_(receiver, function->GetIsolate()),
-        function_(function),
-        code_(code),
-        offset_(offset),
-        is_constructor_(is_constructor) { }
+  FrameSummary(Object* receiver, JSFunction* function, Code* code, int offset,
+               bool is_constructor);
+
   Handle<Object> receiver() { return receiver_; }
   Handle<JSFunction> function() { return function_; }
   Handle<Code> code() { return code_; }
@@ -568,6 +578,10 @@ class JavaScriptFrame: public StandardFrame {
 
   // Check if this frame is a constructor frame invoked through 'new'.
   bool IsConstructor() const;
+
+  // Determines whether this frame includes inlined activations. To get details
+  // about the inlined frames use {GetFunctions} and {Summarize}.
+  bool HasInlinedFrames();
 
   // Returns the original constructor function that was used in the constructor
   // call to this frame. Note that this is only valid on constructor frames.
@@ -678,6 +692,8 @@ class OptimizedFrame : public JavaScriptFrame {
 
   DeoptimizationInputData* GetDeoptimizationData(int* deopt_index);
 
+  static int StackSlotOffsetRelativeToFp(int slot_index);
+
  protected:
   inline explicit OptimizedFrame(StackFrameIteratorBase* iterator);
 
@@ -685,6 +701,17 @@ class OptimizedFrame : public JavaScriptFrame {
   friend class StackFrameIteratorBase;
 
   Object* StackSlotAt(int index) const;
+};
+
+
+class InterpretedFrame : public JavaScriptFrame {
+  virtual Type type() const { return INTERPRETED; }
+
+ protected:
+  inline explicit InterpretedFrame(StackFrameIteratorBase* iterator);
+
+ private:
+  friend class StackFrameIteratorBase;
 };
 
 
@@ -936,6 +963,7 @@ class StackFrameLocator BASE_EMBEDDED {
 // zone memory.
 Vector<StackFrame*> CreateStackMap(Isolate* isolate, Zone* zone);
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_FRAMES_H_

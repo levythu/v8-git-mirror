@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --stack-size=100 --harmony --harmony-reflect --harmony-arrays
-// Flags: --harmony-regexps --harmony-simd --strong-mode
+// Flags: --stack-size=100 --harmony --harmony-reflect --harmony-regexps
+// Flags: --harmony-simd --strong-mode
 
 function test(f, expected, type) {
   try {
@@ -62,10 +62,10 @@ test(function() {
   Array.prototype.shift.call(null);
 }, "Array.prototype.shift called on null or undefined", TypeError);
 
-// kCannotPreventExtExternalArray
+// kCannotFreezeArrayBufferView
 test(function() {
-  Object.preventExtensions(new Uint16Array(1));
-}, "Cannot prevent extension of an object with external array elements", TypeError);
+  Object.freeze(new Uint16Array(1));
+}, "Cannot freeze array buffer views with elements", TypeError);
 
 // kConstAssign
 test(function() {
@@ -76,7 +76,8 @@ test(function() {
 
 // kCannotConvertToPrimitive
 test(function() {
-  [].join(Object(Symbol(1)));
+  var o = { toString: function() { return this } };
+  [].join(o);
 }, "Cannot convert object to primitive value", TypeError);
 
 // kCircularStructure
@@ -300,18 +301,13 @@ test(function() {
 test(function() {
   "use strict";
   (1).a = 1;
-}, "Cannot assign to read only property 'a' of 1", TypeError);
+}, "Cannot create property 'a' on number '1'", TypeError);
 
 // kStrongImplicitCast
 test(function() {
   "use strong";
   "a" + 1;
 }, "In strong mode, implicit conversions are deprecated", TypeError);
-
-// kSymbolToPrimitive
-test(function() {
-  1 + Object(Symbol());
-}, "Cannot convert a Symbol wrapper object to a primitive value", TypeError);
 
 // kSymbolToString
 test(function() {
@@ -325,7 +321,7 @@ test(function() {
 
 // kSimdToNumber
 test(function() {
-  1 + SIMD.float32x4(1, 2, 3, 4);
+  1 + SIMD.Float32x4(1, 2, 3, 4);
 }, "Cannot convert a SIMD value to a number", TypeError);
 
 // kUndefinedOrNullToObject
@@ -336,8 +332,8 @@ test(function() {
 // kValueAndAccessor
 test(function() {
   Object.defineProperty({}, "x", { get: function(){}, value: 1});
-}, "Invalid property.  A property cannot both have accessors and be " +
-   "writable or have a value, #<Object>", TypeError);
+}, "Invalid property descriptor. Cannot both specify accessors " +
+   "and a value or writable attribute, #<Object>", TypeError);
 
 // kWithExpression
 test(function() {

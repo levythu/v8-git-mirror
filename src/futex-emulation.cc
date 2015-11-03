@@ -21,6 +21,23 @@ base::LazyInstance<FutexWaitList>::type FutexEmulation::wait_list_ =
     LAZY_INSTANCE_INITIALIZER;
 
 
+void FutexWaitListNode::NotifyWake() {
+  // Lock the FutexEmulation mutex before notifying. We know that the mutex
+  // will have been unlocked if we are currently waiting on the condition
+  // variable.
+  //
+  // The mutex may also not be locked if the other thread is currently handling
+  // interrupts, or if FutexEmulation::Wait was just called and the mutex
+  // hasn't been locked yet. In either of those cases, we set the interrupted
+  // flag to true, which will be tested after the mutex is re-locked.
+  base::LockGuard<base::Mutex> lock_guard(FutexEmulation::mutex_.Pointer());
+  if (waiting_) {
+    cond_.NotifyOne();
+    interrupted_ = true;
+  }
+}
+
+
 FutexWaitList::FutexWaitList() : head_(nullptr), tail_(nullptr) {}
 
 
@@ -58,12 +75,6 @@ void FutexWaitList::RemoveNode(FutexWaitListNode* node) {
 Object* FutexEmulation::Wait(Isolate* isolate,
                              Handle<JSArrayBuffer> array_buffer, size_t addr,
                              int32_t value, double rel_timeout_ms) {
-  // We never want to wait longer than this amount of time; this way we can
-  // interrupt this thread even if this is an "infinitely blocking" wait.
-  // TODO(binji): come up with a better way of interrupting only when
-  // necessary, rather than busy-waiting.
-  const base::TimeDelta kMaxWaitTime = base::TimeDelta::FromMilliseconds(50);
-
   DCHECK(addr < NumberToSize(isolate, array_buffer->byte_length()));
 
   void* backing_store = array_buffer->backing_store();
@@ -101,45 +112,77 @@ Object* FutexEmulation::Wait(Isolate* isolate,
     }
   }
 
-  base::TimeDelta rel_time_left = rel_timeout;
+  base::TimeTicks start_time = base::TimeTicks::Now();
+  base::TimeTicks timeout_time = start_time + rel_timeout;
+  base::TimeTicks current_time = start_time;
 
   wait_list_.Pointer()->AddNode(node);
 
   Object* result;
 
   while (true) {
-    base::TimeDelta time_to_wait = (use_timeout && rel_time_left < kMaxWaitTime)
-                                       ? rel_time_left
-                                       : kMaxWaitTime;
+    bool interrupted = node->interrupted_;
+    node->interrupted_ = false;
 
-    base::Time start_time = base::Time::NowFromSystemTime();
-    bool wait_for_result = node->cond_.WaitFor(mutex_.Pointer(), time_to_wait);
-    USE(wait_for_result);
+    // Unlock the mutex here to prevent deadlock from lock ordering between
+    // mutex_ and mutexes locked by HandleInterrupts.
+    mutex_.Pointer()->Unlock();
+
+    // Because the mutex is unlocked, we have to be careful about not dropping
+    // an interrupt. The notification can happen in three different places:
+    // 1) Before Wait is called: the notification will be dropped, but
+    //    interrupted_ will be set to 1. This will be checked below.
+    // 2) After interrupted has been checked here, but before mutex_ is
+    //    acquired: interrupted is checked again below, with mutex_ locked.
+    //    Because the wakeup signal also acquires mutex_, we know it will not
+    //    be able to notify until mutex_ is released below, when waiting on the
+    //    condition variable.
+    // 3) After the mutex is released in the call to WaitFor(): this
+    // notification will wake up the condition variable. node->waiting() will
+    // be false, so we'll loop and then check interrupts.
+    if (interrupted) {
+      Object* interrupt_object = isolate->stack_guard()->HandleInterrupts();
+      if (interrupt_object->IsException()) {
+        result = interrupt_object;
+        mutex_.Pointer()->Lock();
+        break;
+      }
+    }
+
+    mutex_.Pointer()->Lock();
+
+    if (node->interrupted_) {
+      // An interrupt occured while the mutex_ was unlocked. Don't wait yet.
+      continue;
+    }
 
     if (!node->waiting_) {
       result = Smi::FromInt(Result::kOk);
       break;
     }
 
-    // Spurious wakeup or timeout.
-    base::Time end_time = base::Time::NowFromSystemTime();
-    base::TimeDelta waited_for = end_time - start_time;
-    rel_time_left -= waited_for;
+    // No interrupts, now wait.
+    if (use_timeout) {
+      current_time = base::TimeTicks::Now();
+      if (current_time >= timeout_time) {
+        result = Smi::FromInt(Result::kTimedOut);
+        break;
+      }
 
-    if (use_timeout && rel_time_left < base::TimeDelta::FromMicroseconds(0)) {
-      result = Smi::FromInt(Result::kTimedOut);
-      break;
+      base::TimeDelta time_until_timeout = timeout_time - current_time;
+      DCHECK(time_until_timeout.InMicroseconds() >= 0);
+      bool wait_for_result =
+          node->cond_.WaitFor(mutex_.Pointer(), time_until_timeout);
+      USE(wait_for_result);
+    } else {
+      node->cond_.Wait(mutex_.Pointer());
     }
 
-    // Potentially handle interrupts before continuing to wait.
-    Object* interrupt_object = isolate->stack_guard()->HandleInterrupts();
-    if (interrupt_object->IsException()) {
-      result = interrupt_object;
-      break;
-    }
+    // Spurious wakeup, interrupt or timeout.
   }
 
   wait_list_.Pointer()->RemoveNode(node);
+  node->waiting_ = false;
 
   return result;
 }

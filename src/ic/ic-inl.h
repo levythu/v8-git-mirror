@@ -8,7 +8,7 @@
 #include "src/ic/ic.h"
 
 #include "src/compiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/macro-assembler.h"
 #include "src/prototype.h"
 
@@ -60,6 +60,7 @@ void IC::SetTargetAtAddress(Address address, Code* target,
   DCHECK(!target->is_inline_cache_stub() ||
          (target->kind() != Code::LOAD_IC &&
           target->kind() != Code::KEYED_LOAD_IC &&
+          target->kind() != Code::CALL_IC &&
           (!FLAG_vector_stores || (target->kind() != Code::STORE_IC &&
                                    target->kind() != Code::KEYED_STORE_IC))));
 
@@ -126,24 +127,6 @@ Code* IC::raw_target() const {
 void IC::UpdateTarget() { target_ = handle(raw_target(), isolate_); }
 
 
-JSFunction* IC::GetRootConstructor(Map* receiver_map, Context* native_context) {
-  Isolate* isolate = receiver_map->GetIsolate();
-  if (receiver_map == isolate->heap()->boolean_map()) {
-    return native_context->boolean_function();
-  } else if (receiver_map->instance_type() == HEAP_NUMBER_TYPE) {
-    return native_context->number_function();
-  } else if (receiver_map->instance_type() < FIRST_NONSTRING_TYPE) {
-    return native_context->string_function();
-  } else if (receiver_map->instance_type() == SYMBOL_TYPE) {
-    return native_context->symbol_function();
-  } else if (receiver_map->instance_type() == FLOAT32X4_TYPE) {
-    return native_context->float32x4_function();
-  } else {
-    return NULL;
-  }
-}
-
-
 Handle<Map> IC::GetHandlerCacheHolder(Handle<Map> receiver_map,
                                       bool receiver_is_holder, Isolate* isolate,
                                       CacheHolderFlag* flag) {
@@ -151,9 +134,9 @@ Handle<Map> IC::GetHandlerCacheHolder(Handle<Map> receiver_map,
     *flag = kCacheOnReceiver;
     return receiver_map;
   }
-  Context* native_context = *isolate->native_context();
-  JSFunction* builtin_ctor = GetRootConstructor(*receiver_map, native_context);
-  if (builtin_ctor != NULL) {
+  Handle<JSFunction> builtin_ctor;
+  if (Map::GetConstructorFunction(receiver_map, isolate->native_context())
+          .ToHandle(&builtin_ctor)) {
     *flag = kCacheOnPrototypeReceiverIsPrimitive;
     return handle(HeapObject::cast(builtin_ctor->instance_prototype())->map());
   }
@@ -167,9 +150,9 @@ Handle<Map> IC::GetHandlerCacheHolder(Handle<Map> receiver_map,
 
 Handle<Map> IC::GetICCacheHolder(Handle<Map> map, Isolate* isolate,
                                  CacheHolderFlag* flag) {
-  Context* native_context = *isolate->native_context();
-  JSFunction* builtin_ctor = GetRootConstructor(*map, native_context);
-  if (builtin_ctor != NULL) {
+  Handle<JSFunction> builtin_ctor;
+  if (Map::GetConstructorFunction(map, isolate->native_context())
+          .ToHandle(&builtin_ctor)) {
     *flag = kCacheOnPrototype;
     return handle(builtin_ctor->initial_map());
   }
@@ -197,7 +180,7 @@ bool IC::AddressIsDeoptimizedCode(Isolate* isolate, Address address) {
   return (host->kind() == Code::OPTIMIZED_FUNCTION &&
           host->marked_for_deoptimization());
 }
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_IC_INL_H_

@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+// TODO(jochen): Remove this after the setting is turned on globally.
+#define V8_IMMINENT_DEPRECATION_WARNINGS
 
 #include "test/cctest/compiler/function-tester.h"
 
-using namespace v8::internal;
-using namespace v8::internal::compiler;
+namespace v8 {
+namespace internal {
+namespace compiler {
+
 uint32_t flags = CompilationInfo::kInliningEnabled;
 
 
@@ -128,32 +131,6 @@ TEST(IsMinusZero) {
 }
 
 
-TEST(IsNonNegativeSmi) {
-  FunctionTester T("(function(a) { return %_IsNonNegativeSmi(a); })", flags);
-
-  T.CheckTrue(T.Val(1));
-  T.CheckFalse(T.Val(1.1));
-  T.CheckFalse(T.Val(-0.0));
-  T.CheckFalse(T.Val(-2));
-  T.CheckFalse(T.Val(-2.3));
-  T.CheckFalse(T.undefined());
-}
-
-
-TEST(IsObject) {
-  FunctionTester T("(function(a) { return %_IsObject(a); })", flags);
-
-  T.CheckFalse(T.NewObject("(function() {})"));
-  T.CheckTrue(T.NewObject("([1])"));
-  T.CheckTrue(T.NewObject("({})"));
-  T.CheckTrue(T.NewObject("(/x/)"));
-  T.CheckFalse(T.undefined());
-  T.CheckTrue(T.null());
-  T.CheckFalse(T.Val("x"));
-  T.CheckFalse(T.Val(1));
-}
-
-
 TEST(IsRegExp) {
   FunctionTester T("(function(a) { return %_IsRegExp(a); })", flags);
 
@@ -240,17 +217,6 @@ TEST(OneByteSeqStringSetChar) {
   CHECK_EQ('b', string->SeqOneByteStringGet(0));
   CHECK_EQ('X', string->SeqOneByteStringGet(1));
   CHECK_EQ('r', string->SeqOneByteStringGet(2));
-}
-
-
-TEST(NewConsString) {
-  FunctionTester T(
-      "(function() { "
-      "   return %_NewConsString(14, true, 'abcdefghi', 'jklmn');"
-      " })",
-      flags);
-
-  T.CheckCall(T.Val("abcdefghijklmn"));
 }
 
 
@@ -357,3 +323,7 @@ TEST(ValueOf) {
   T.CheckCall(T.Val(123), T.Val(123));
   T.CheckCall(T.Val(456), T.NewObject("(new Number(456))"));
 }
+
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8

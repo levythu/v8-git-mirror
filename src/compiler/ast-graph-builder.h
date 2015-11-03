@@ -19,7 +19,6 @@ namespace compiler {
 
 class ControlBuilder;
 class Graph;
-class JSTypeFeedbackTable;
 class LoopAssignmentAnalysis;
 class LoopBuilder;
 class Node;
@@ -31,8 +30,7 @@ class Node;
 class AstGraphBuilder : public AstVisitor {
  public:
   AstGraphBuilder(Zone* local_zone, CompilationInfo* info, JSGraph* jsgraph,
-                  LoopAssignmentAnalysis* loop_assignment = NULL,
-                  JSTypeFeedbackTable* js_type_feedback = NULL);
+                  LoopAssignmentAnalysis* loop_assignment = NULL);
 
   // Creates a graph by visiting the entire AST.
   bool CreateGraph(bool stack_check = true);
@@ -70,6 +68,7 @@ class AstGraphBuilder : public AstVisitor {
   class FrameStateBeforeAndAfter;
   friend class ControlBuilder;
 
+  Isolate* isolate_;
   Zone* local_zone_;
   CompilationInfo* info_;
   JSGraph* jsgraph_;
@@ -115,9 +114,6 @@ class AstGraphBuilder : public AstVisitor {
   // Function info for frame state construction.
   const FrameStateFunctionInfo* const frame_state_function_info_;
 
-  // Type feedback table.
-  JSTypeFeedbackTable* js_type_feedback_;
-
   // Growth increment for the temporary buffer used to construct input lists to
   // new nodes.
   static const int kInputBufferSizeIncrement = 64;
@@ -129,6 +125,7 @@ class AstGraphBuilder : public AstVisitor {
   ContextScope* execution_context() const { return execution_context_; }
   CommonOperatorBuilder* common() const { return jsgraph_->common(); }
   CompilationInfo* info() const { return info_; }
+  Isolate* isolate() const { return isolate_; }
   LanguageMode language_mode() const;
   JSGraph* jsgraph() { return jsgraph_; }
   Graph* graph() { return jsgraph_->graph(); }
@@ -230,16 +227,10 @@ class AstGraphBuilder : public AstVisitor {
   // frame states with the undefined values.
   void ClearNonLiveSlotsInFrameStates();
 
-  // Helper to wrap a Handle<T> into a Unique<T>.
-  template <class T>
-  Unique<T> MakeUnique(Handle<T> object) {
-    return Unique<T>::CreateUninitialized(object);
-  }
-
   Node** EnsureInputBufferSize(int size);
 
   // Named and keyed loads require a VectorSlotPair for successful lowering.
-  VectorSlotPair CreateVectorSlotPair(FeedbackVectorICSlot slot) const;
+  VectorSlotPair CreateVectorSlotPair(FeedbackVectorSlot slot) const;
 
   // Determine which contexts need to be checked for extension objects that
   // might shadow the optimistic declaration of dynamic lookup variables.
@@ -255,15 +246,13 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildPatchReceiverToGlobalProxy(Node* receiver);
 
   // Builders to create local function, script and block contexts.
-  Node* BuildLocalFunctionContext(Node* context);
+  Node* BuildLocalActivationContext(Node* context);
+  Node* BuildLocalFunctionContext(Scope* scope);
   Node* BuildLocalScriptContext(Scope* scope);
   Node* BuildLocalBlockContext(Scope* scope);
 
   // Builder to create an arguments object if it is used.
   Node* BuildArgumentsObject(Variable* arguments);
-
-  // Builder to create an array of rest parameters if used
-  Node* BuildRestArgumentsArray(Variable* rest, int index);
 
   // Builder that assigns to the {.this_function} internal variable if needed.
   Node* BuildThisFunctionVariable(Variable* this_function_var);
@@ -292,31 +281,29 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildNamedLoad(Node* receiver, Handle<Name> name,
                        const VectorSlotPair& feedback);
   Node* BuildKeyedStore(Node* receiver, Node* key, Node* value,
-                        const VectorSlotPair& feedback, TypeFeedbackId id);
+                        const VectorSlotPair& feedback);
   Node* BuildNamedStore(Node* receiver, Handle<Name> name, Node* value,
-                        const VectorSlotPair& feedback, TypeFeedbackId id);
+                        const VectorSlotPair& feedback);
 
   // Builders for super property loads and stores.
   Node* BuildKeyedSuperStore(Node* receiver, Node* home_object, Node* key,
-                             Node* value, TypeFeedbackId id);
+                             Node* value);
   Node* BuildNamedSuperStore(Node* receiver, Node* home_object,
-                             Handle<Name> name, Node* value, TypeFeedbackId id);
+                             Handle<Name> name, Node* value);
   Node* BuildNamedSuperLoad(Node* receiver, Node* home_object,
                             Handle<Name> name, const VectorSlotPair& feedback);
   Node* BuildKeyedSuperLoad(Node* receiver, Node* home_object, Node* key,
                             const VectorSlotPair& feedback);
 
   // Builders for global variable loads and stores.
-  Node* BuildGlobalLoad(Node* script_context, Node* global, Handle<Name> name,
-                        const VectorSlotPair& feedback, TypeofMode typeof_mode,
-                        int slot_index);
-  Node* BuildGlobalStore(Node* script_context, Node* global, Handle<Name> name,
-                         Node* value, const VectorSlotPair& feedback,
-                         TypeFeedbackId id, int slot_index);
+  Node* BuildGlobalLoad(Handle<Name> name, const VectorSlotPair& feedback,
+                        TypeofMode typeof_mode);
+  Node* BuildGlobalStore(Handle<Name> name, Node* value,
+                         const VectorSlotPair& feedback);
 
   // Builders for accessing the function context.
-  Node* BuildLoadBuiltinsObject();
   Node* BuildLoadGlobalObject();
+  Node* BuildLoadNativeContextField(int index);
   Node* BuildLoadGlobalProxy();
   Node* BuildLoadFeedbackVector();
 
@@ -335,8 +322,9 @@ class AstGraphBuilder : public AstVisitor {
 
   // Builder for adding the [[HomeObject]] to a value if the value came from a
   // function literal and needs a home object. Do nothing otherwise.
-  Node* BuildSetHomeObject(Node* value, Node* home_object, Expression* expr,
-                           const VectorSlotPair& feedback);
+  Node* BuildSetHomeObject(Node* value, Node* home_object,
+                           ObjectLiteralProperty* property,
+                           int slot_number = 0);
 
   // Builders for error reporting at runtime.
   Node* BuildThrowError(Node* exception, BailoutId bailout_id);
@@ -365,6 +353,28 @@ class AstGraphBuilder : public AstVisitor {
   // Process arguments to a call by popping {arity} elements off the operand
   // stack and build a call node using the given call operator.
   Node* ProcessArguments(const Operator* op, int arity);
+
+  // ===========================================================================
+  // The following build methods have the same contract as the above ones, but
+  // they can also return {NULL} to indicate that no fragment was built. Note
+  // that these are optimizations, disabling any of them should still produce
+  // correct graphs.
+
+  // Optimization for variable load from global object.
+  Node* TryLoadGlobalConstant(Handle<Name> name);
+
+  // Optimization for variable load of dynamic lookup slot that is most likely
+  // to resolve to a global slot or context slot (inferred from scope chain).
+  Node* TryLoadDynamicVariable(Variable* variable, Handle<String> name,
+                               BailoutId bailout_id,
+                               FrameStateBeforeAndAfter& states,
+                               const VectorSlotPair& feedback,
+                               OutputFrameStateCombine combine,
+                               TypeofMode typeof_mode);
+
+  // Optimizations for automatic type conversion.
+  Node* TryFastToBoolean(Node* input);
+  Node* TryFastToName(Node* input);
 
   // ===========================================================================
   // The following visitation methods all recursively visit a subtree of the
@@ -409,7 +419,12 @@ class AstGraphBuilder : public AstVisitor {
   // Dispatched from VisitForInStatement.
   void VisitForInAssignment(Expression* expr, Node* value,
                             const VectorSlotPair& feedback,
-                            BailoutId bailout_id);
+                            BailoutId bailout_id_before,
+                            BailoutId bailout_id_after);
+
+  // Dispatched from VisitObjectLiteral.
+  void VisitObjectLiteralAccessor(Node* home_object,
+                                  ObjectLiteralProperty* property);
 
   // Dispatched from VisitClassLiteral.
   void VisitClassLiteralContents(ClassLiteral* expr);

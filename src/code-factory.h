@@ -56,39 +56,53 @@ class CodeFactory final {
 
   static Callable CompareIC(Isolate* isolate, Token::Value op,
                             Strength strength);
+  static Callable CompareNilIC(Isolate* isolate, NilValue nil_value);
 
   static Callable BinaryOpIC(Isolate* isolate, Token::Value op,
                              Strength strength);
 
   // Code stubs. Add methods here as needed to reduce dependency on
   // code-stubs.h.
-  static Callable LoadGlobalViaContext(Isolate* isolate, int depth);
-  static Callable StoreGlobalViaContext(Isolate* isolate, int depth,
-                                        LanguageMode language_mode);
-
-  static Callable Instanceof(Isolate* isolate, InstanceofStub::Flags flags);
+  static Callable InstanceOf(Isolate* isolate);
 
   static Callable ToBoolean(
       Isolate* isolate, ToBooleanStub::ResultMode mode,
       ToBooleanStub::Types types = ToBooleanStub::Types());
 
   static Callable ToNumber(Isolate* isolate);
+  static Callable ToString(Isolate* isolate);
+  static Callable ToLength(Isolate* isolate);
+  static Callable ToObject(Isolate* isolate);
+  static Callable NumberToString(Isolate* isolate);
+
+  static Callable RegExpConstructResult(Isolate* isolate);
 
   static Callable StringAdd(Isolate* isolate, StringAddFlags flags,
                             PretenureFlag pretenure_flag);
+  static Callable StringCompare(Isolate* isolate);
 
   static Callable Typeof(Isolate* isolate);
 
   static Callable FastCloneShallowArray(Isolate* isolate);
   static Callable FastCloneShallowObject(Isolate* isolate, int length);
 
+  static Callable FastNewContext(Isolate* isolate, int slot_count);
   static Callable FastNewClosure(Isolate* isolate, LanguageMode language_mode,
                                  FunctionKind kind);
 
+  static Callable ArgumentsAccess(Isolate* isolate, bool is_unmapped_arguments,
+                                  bool has_duplicate_parameters);
+
   static Callable AllocateHeapNumber(Isolate* isolate);
+  static Callable AllocateMutableHeapNumber(Isolate* isolate);
+  static Callable AllocateInNewSpace(Isolate* isolate);
 
   static Callable CallFunction(Isolate* isolate, int argc,
                                CallFunctionFlags flags);
+
+  static Callable InterpreterPushArgsAndCall(Isolate* isolate);
+  static Callable InterpreterPushArgsAndConstruct(Isolate* isolate);
+  static Callable InterpreterCEntry(Isolate* isolate);
 };
 
 }  // namespace internal

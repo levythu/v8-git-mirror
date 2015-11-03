@@ -2,10 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/code-factory.h"
 
 #include "src/bootstrapper.h"
-#include "src/code-factory.h"
 #include "src/ic/ic.h"
 
 namespace v8 {
@@ -131,6 +130,13 @@ Callable CodeFactory::CompareIC(Isolate* isolate, Token::Value op,
 
 
 // static
+Callable CodeFactory::CompareNilIC(Isolate* isolate, NilValue nil_value) {
+  Handle<Code> code = CompareNilICStub::GetUninitialized(isolate, nil_value);
+  return Callable(code, CompareNilDescriptor(isolate));
+}
+
+
+// static
 Callable CodeFactory::BinaryOpIC(Isolate* isolate, Token::Value op,
                                  Strength strength) {
   BinaryOpICStub stub(isolate, op, strength);
@@ -139,24 +145,8 @@ Callable CodeFactory::BinaryOpIC(Isolate* isolate, Token::Value op,
 
 
 // static
-Callable CodeFactory::LoadGlobalViaContext(Isolate* isolate, int depth) {
-  LoadGlobalViaContextStub stub(isolate, depth);
-  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
-}
-
-
-// static
-Callable CodeFactory::StoreGlobalViaContext(Isolate* isolate, int depth,
-                                            LanguageMode language_mode) {
-  StoreGlobalViaContextStub stub(isolate, depth, language_mode);
-  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
-}
-
-
-// static
-Callable CodeFactory::Instanceof(Isolate* isolate,
-                                 InstanceofStub::Flags flags) {
-  InstanceofStub stub(isolate, flags);
+Callable CodeFactory::InstanceOf(Isolate* isolate) {
+  InstanceOfStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -178,9 +168,51 @@ Callable CodeFactory::ToNumber(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::ToString(Isolate* isolate) {
+  ToStringStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::ToLength(Isolate* isolate) {
+  ToLengthStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::ToObject(Isolate* isolate) {
+  ToObjectStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::NumberToString(Isolate* isolate) {
+  NumberToStringStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::RegExpConstructResult(Isolate* isolate) {
+  RegExpConstructResultStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::StringAdd(Isolate* isolate, StringAddFlags flags,
                                 PretenureFlag pretenure_flag) {
   StringAddStub stub(isolate, flags, pretenure_flag);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::StringCompare(Isolate* isolate) {
+  StringCompareStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -208,10 +240,28 @@ Callable CodeFactory::FastCloneShallowObject(Isolate* isolate, int length) {
 
 
 // static
+Callable CodeFactory::FastNewContext(Isolate* isolate, int slot_count) {
+  FastNewContextStub stub(isolate, slot_count);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::FastNewClosure(Isolate* isolate,
                                      LanguageMode language_mode,
                                      FunctionKind kind) {
   FastNewClosureStub stub(isolate, language_mode, kind);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::ArgumentsAccess(Isolate* isolate,
+                                      bool is_unmapped_arguments,
+                                      bool has_duplicate_parameters) {
+  ArgumentsAccessStub::Type type = ArgumentsAccessStub::ComputeType(
+      is_unmapped_arguments, has_duplicate_parameters);
+  ArgumentsAccessStub stub(isolate, type);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -224,10 +274,48 @@ Callable CodeFactory::AllocateHeapNumber(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::AllocateMutableHeapNumber(Isolate* isolate) {
+  AllocateMutableHeapNumberStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::AllocateInNewSpace(Isolate* isolate) {
+  AllocateInNewSpaceStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::CallFunction(Isolate* isolate, int argc,
                                    CallFunctionFlags flags) {
   CallFunctionStub stub(isolate, argc, flags);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::InterpreterPushArgsAndCall(Isolate* isolate) {
+  return Callable(isolate->builtins()->InterpreterPushArgsAndCall(),
+                  InterpreterPushArgsAndCallDescriptor(isolate));
+}
+
+
+// static
+Callable CodeFactory::InterpreterPushArgsAndConstruct(Isolate* isolate) {
+  return Callable(isolate->builtins()->InterpreterPushArgsAndConstruct(),
+                  InterpreterPushArgsAndConstructDescriptor(isolate));
+}
+
+
+// static
+Callable CodeFactory::InterpreterCEntry(Isolate* isolate) {
+  // TODO(rmcilroy): Deal with runtime functions that return two values.
+  // Note: If we ever use fpregs in the interpreter then we will need to
+  // save fpregs too.
+  CEntryStub stub(isolate, 1, kDontSaveFPRegs, kArgvInRegister);
+  return Callable(stub.GetCode(), InterpreterCEntryDescriptor(isolate));
 }
 
 }  // namespace internal

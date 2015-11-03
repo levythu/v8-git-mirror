@@ -44,16 +44,18 @@
 #include "src/builtins.h"
 #include "src/codegen.h"
 #include "src/counters.h"
-#include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/execution.h"
 #include "src/ic/ic.h"
 #include "src/ic/stub-cache.h"
-#include "src/jsregexp.h"
-#include "src/regexp-macro-assembler.h"
-#include "src/regexp-stack.h"
+#include "src/profiler/cpu-profiler.h"
+#include "src/regexp/jsregexp.h"
+#include "src/regexp/regexp-macro-assembler.h"
+#include "src/regexp/regexp-stack.h"
+#include "src/register-configuration.h"
 #include "src/runtime/runtime.h"
+#include "src/simulator.h"  // For flushing instruction cache.
 #include "src/snapshot/serialize.h"
 #include "src/token.h"
 
@@ -80,21 +82,21 @@
 // Include native regexp-macro-assembler.
 #ifndef V8_INTERPRETED_REGEXP
 #if V8_TARGET_ARCH_IA32
-#include "src/ia32/regexp-macro-assembler-ia32.h"  // NOLINT
+#include "src/regexp/ia32/regexp-macro-assembler-ia32.h"  // NOLINT
 #elif V8_TARGET_ARCH_X64
-#include "src/x64/regexp-macro-assembler-x64.h"  // NOLINT
+#include "src/regexp/x64/regexp-macro-assembler-x64.h"  // NOLINT
 #elif V8_TARGET_ARCH_ARM64
-#include "src/arm64/regexp-macro-assembler-arm64.h"  // NOLINT
+#include "src/regexp/arm64/regexp-macro-assembler-arm64.h"  // NOLINT
 #elif V8_TARGET_ARCH_ARM
-#include "src/arm/regexp-macro-assembler-arm.h"  // NOLINT
+#include "src/regexp/arm/regexp-macro-assembler-arm.h"  // NOLINT
 #elif V8_TARGET_ARCH_PPC
-#include "src/ppc/regexp-macro-assembler-ppc.h"  // NOLINT
+#include "src/regexp/ppc/regexp-macro-assembler-ppc.h"  // NOLINT
 #elif V8_TARGET_ARCH_MIPS
-#include "src/mips/regexp-macro-assembler-mips.h"  // NOLINT
+#include "src/regexp/mips/regexp-macro-assembler-mips.h"  // NOLINT
 #elif V8_TARGET_ARCH_MIPS64
-#include "src/mips64/regexp-macro-assembler-mips64.h"  // NOLINT
+#include "src/regexp/mips64/regexp-macro-assembler-mips64.h"  // NOLINT
 #elif V8_TARGET_ARCH_X87
-#include "src/x87/regexp-macro-assembler-x87.h"  // NOLINT
+#include "src/regexp/x87/regexp-macro-assembler-x87.h"  // NOLINT
 #else  // Unknown architecture.
 #error "Unknown architecture."
 #endif  // Target architecture.
@@ -102,6 +104,39 @@
 
 namespace v8 {
 namespace internal {
+
+// -----------------------------------------------------------------------------
+// Common register code.
+
+const char* Register::ToString() {
+  // This is the mapping of allocation indices to registers.
+  DCHECK(reg_code >= 0 && reg_code < kNumRegisters);
+  return RegisterConfiguration::ArchDefault(RegisterConfiguration::CRANKSHAFT)
+      ->GetGeneralRegisterName(reg_code);
+}
+
+
+bool Register::IsAllocatable() const {
+  return ((1 << reg_code) &
+          RegisterConfiguration::ArchDefault(RegisterConfiguration::CRANKSHAFT)
+              ->allocatable_general_codes_mask()) != 0;
+}
+
+
+const char* DoubleRegister::ToString() {
+  // This is the mapping of allocation indices to registers.
+  DCHECK(reg_code >= 0 && reg_code < kMaxNumRegisters);
+  return RegisterConfiguration::ArchDefault(RegisterConfiguration::CRANKSHAFT)
+      ->GetDoubleRegisterName(reg_code);
+}
+
+
+bool DoubleRegister::IsAllocatable() const {
+  return ((1 << reg_code) &
+          RegisterConfiguration::ArchDefault(RegisterConfiguration::CRANKSHAFT)
+              ->allocatable_double_codes_mask()) != 0;
+}
+
 
 // -----------------------------------------------------------------------------
 // Common double constants.
@@ -152,6 +187,31 @@ AssemblerBase::AssemblerBase(Isolate* isolate, void* buffer, int buffer_size)
 
 AssemblerBase::~AssemblerBase() {
   if (own_buffer_) DeleteArray(buffer_);
+}
+
+
+void AssemblerBase::FlushICache(Isolate* isolate, void* start, size_t size) {
+  if (size == 0) return;
+  if (CpuFeatures::IsSupported(COHERENT_CACHE)) return;
+
+#if defined(USE_SIMULATOR)
+  Simulator::FlushICache(isolate->simulator_i_cache(), start, size);
+#else
+  CpuFeatures::FlushICache(start, size);
+#endif  // USE_SIMULATOR
+}
+
+
+void AssemblerBase::FlushICacheWithoutIsolate(void* start, size_t size) {
+  // Ideally we would just call Isolate::Current() here. However, this flushes
+  // out issues because we usually only need the isolate when in the simulator.
+  Isolate* isolate;
+#if defined(USE_SIMULATOR)
+  isolate = Isolate::Current();
+#else
+  isolate = nullptr;
+#endif  // USE_SIMULATOR
+  FlushICache(isolate, start, size);
 }
 
 
@@ -980,24 +1040,18 @@ ExternalReference::ExternalReference(Builtins::Name name, Isolate* isolate)
   : address_(isolate->builtins()->builtin_address(name)) {}
 
 
-ExternalReference::ExternalReference(Runtime::FunctionId id,
-                                     Isolate* isolate)
-  : address_(Redirect(isolate, Runtime::FunctionForId(id)->entry)) {}
+ExternalReference::ExternalReference(Runtime::FunctionId id, Isolate* isolate)
+    : address_(Redirect(isolate, Runtime::FunctionForId(id)->entry)) {}
 
 
 ExternalReference::ExternalReference(const Runtime::Function* f,
                                      Isolate* isolate)
-  : address_(Redirect(isolate, f->entry)) {}
+    : address_(Redirect(isolate, f->entry)) {}
 
 
 ExternalReference ExternalReference::isolate_address(Isolate* isolate) {
   return ExternalReference(isolate);
 }
-
-
-ExternalReference::ExternalReference(const IC_Utility& ic_utility,
-                                     Isolate* isolate)
-  : address_(Redirect(isolate, ic_utility.address())) {}
 
 
 ExternalReference::ExternalReference(StatsCounter* counter)
@@ -1025,12 +1079,6 @@ ExternalReference ExternalReference::
   return ExternalReference(Redirect(
       isolate,
       FUNCTION_ADDR(StoreBuffer::StoreBufferOverflow)));
-}
-
-
-ExternalReference ExternalReference::flush_icache_function(Isolate* isolate) {
-  return ExternalReference(
-      Redirect(isolate, FUNCTION_ADDR(CpuFeatures::FlushICache)));
 }
 
 
@@ -1146,7 +1194,7 @@ ExternalReference ExternalReference::new_space_start(Isolate* isolate) {
 
 
 ExternalReference ExternalReference::store_buffer_top(Isolate* isolate) {
-  return ExternalReference(isolate->heap()->store_buffer()->TopAddress());
+  return ExternalReference(isolate->heap()->store_buffer_top_address());
 }
 
 
@@ -1393,6 +1441,24 @@ ExternalReference
 }
 
 
+ExternalReference ExternalReference::virtual_handler_register(
+    Isolate* isolate) {
+  return ExternalReference(isolate->virtual_handler_register_address());
+}
+
+
+ExternalReference ExternalReference::virtual_slot_register(Isolate* isolate) {
+  return ExternalReference(isolate->virtual_slot_register_address());
+}
+
+
+ExternalReference ExternalReference::runtime_function_table_address(
+    Isolate* isolate) {
+  return ExternalReference(
+      const_cast<Runtime::Function*>(Runtime::RuntimeFunctionTable(isolate)));
+}
+
+
 double power_helper(double x, double y) {
   int y_int = static_cast<int>(y);
   if (y == y_int) {
@@ -1501,14 +1567,15 @@ ExternalReference ExternalReference::mod_two_doubles_operation(
 }
 
 
-ExternalReference ExternalReference::debug_break(Isolate* isolate) {
-  return ExternalReference(Redirect(isolate, FUNCTION_ADDR(Debug_Break)));
-}
-
-
 ExternalReference ExternalReference::debug_step_in_fp_address(
     Isolate* isolate) {
   return ExternalReference(isolate->debug()->step_in_fp_addr());
+}
+
+
+ExternalReference ExternalReference::fixed_typed_array_base_data_offset() {
+  return ExternalReference(reinterpret_cast<void*>(
+      FixedTypedArrayBase::kDataOffset - kHeapObjectTag));
 }
 
 

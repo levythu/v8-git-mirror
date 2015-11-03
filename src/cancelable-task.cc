@@ -5,19 +5,19 @@
 #include "src/cancelable-task.h"
 
 #include "src/base/platform/platform.h"
-#include "src/v8.h"
+#include "src/isolate.h"
 
 namespace v8 {
 namespace internal {
 
 
-CancelableTask::CancelableTask(Isolate* isolate)
+Cancelable::Cancelable(Isolate* isolate)
     : isolate_(isolate), is_cancelled_(false) {
   isolate->RegisterCancelableTask(this);
 }
 
 
-CancelableTask::~CancelableTask() {
+Cancelable::~Cancelable() {
   if (!is_cancelled_) {
     isolate_->RemoveCancelableTask(this);
   }

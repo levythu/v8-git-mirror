@@ -22,6 +22,14 @@ class ElementsAccessor {
 
   const char* name() const { return name_; }
 
+  // Returns a shared ElementsAccessor for the specified ElementsKind.
+  static ElementsAccessor* ForKind(ElementsKind elements_kind) {
+    DCHECK(static_cast<int>(elements_kind) < kElementsKindCount);
+    return elements_accessors_[elements_kind];
+  }
+
+  static ElementsAccessor* ForArray(Handle<FixedArrayBase> array);
+
   // Checks the elements of an object for consistency, asserting when a problem
   // is found.
   virtual void Validate(Handle<JSObject> obj) = 0;
@@ -30,13 +38,25 @@ class ElementsAccessor {
   // without iterating up the prototype chain.  The caller can optionally pass
   // in the backing store to use for the check, which must be compatible with
   // the ElementsKind of the ElementsAccessor. If backing_store is NULL, the
-  // holder->elements() is used as the backing store.
+  // holder->elements() is used as the backing store. If a |filter| is
+  // specified the PropertyAttributes of the element at the given index
+  // are compared to the given |filter|. If they match/overlap the given
+  // index is ignored. Note that only Dictionary elements have custom
+  // PropertyAttributes associated, hence the |filter| argument is ignored for
+  // all but DICTIONARY_ELEMENTS and SLOW_SLOPPY_ARGUMENTS_ELEMENTS.
   virtual bool HasElement(Handle<JSObject> holder, uint32_t index,
-                          Handle<FixedArrayBase> backing_store) = 0;
+                          Handle<FixedArrayBase> backing_store,
+                          PropertyAttributes filter = NONE) = 0;
 
-  inline bool HasElement(Handle<JSObject> holder, uint32_t index) {
-    return HasElement(holder, index, handle(holder->elements()));
+  inline bool HasElement(Handle<JSObject> holder, uint32_t index,
+                         PropertyAttributes filter = NONE) {
+    return HasElement(holder, index, handle(holder->elements()), filter);
   }
+
+  // Returns true if the backing store is compact in the given range
+  virtual bool IsPacked(Handle<JSObject> holder,
+                        Handle<FixedArrayBase> backing_store, uint32_t start,
+                        uint32_t end) = 0;
 
   virtual Handle<Object> Get(Handle<FixedArrayBase> backing_store,
                              uint32_t entry) = 0;
@@ -92,41 +112,78 @@ class ElementsAccessor {
       *from_holder, 0, from_kind, to, 0, kCopyToEndAndInitializeToHole);
   }
 
-  virtual void GrowCapacityAndConvert(Handle<JSObject> object,
-                                      uint32_t capacity) = 0;
+  // Copy all indices that have elements from |object| into the given
+  // KeyAccumulator. For Dictionary-based element-kinds we filter out elements
+  // whose PropertyAttribute match |filter|.
+  virtual void CollectElementIndices(Handle<JSObject> object,
+                                     Handle<FixedArrayBase> backing_store,
+                                     KeyAccumulator* keys,
+                                     uint32_t range = kMaxUInt32,
+                                     PropertyAttributes filter = NONE,
+                                     uint32_t offset = 0) = 0;
 
-  virtual Handle<FixedArray> AddElementsToFixedArray(
-      Handle<JSObject> receiver, Handle<FixedArray> to,
-      FixedArray::KeyFilter filter) = 0;
-
-  // Returns a shared ElementsAccessor for the specified ElementsKind.
-  static ElementsAccessor* ForKind(ElementsKind elements_kind) {
-    DCHECK(static_cast<int>(elements_kind) < kElementsKindCount);
-    return elements_accessors_[elements_kind];
+  inline void CollectElementIndices(Handle<JSObject> object,
+                                    KeyAccumulator* keys,
+                                    uint32_t range = kMaxUInt32,
+                                    PropertyAttributes filter = NONE,
+                                    uint32_t offset = 0) {
+    CollectElementIndices(object, handle(object->elements()), keys, range,
+                          filter, offset);
   }
 
-  static ElementsAccessor* ForArray(Handle<FixedArrayBase> array);
+  virtual void AddElementsToKeyAccumulator(Handle<JSObject> receiver,
+                                           KeyAccumulator* accumulator,
+                                           AddKeyConversion convert) = 0;
+
+  virtual void GrowCapacityAndConvert(Handle<JSObject> object,
+                                      uint32_t capacity) = 0;
 
   static void InitializeOncePerProcess();
   static void TearDown();
 
   virtual void Set(FixedArrayBase* backing_store, uint32_t entry,
                    Object* value) = 0;
+
   virtual void Reconfigure(Handle<JSObject> object,
                            Handle<FixedArrayBase> backing_store, uint32_t entry,
                            Handle<Object> value,
                            PropertyAttributes attributes) = 0;
+
   virtual void Add(Handle<JSObject> object, uint32_t index,
                    Handle<Object> value, PropertyAttributes attributes,
                    uint32_t new_capacity) = 0;
+
+  static Handle<JSArray> Concat(Isolate* isolate, Arguments* args,
+                                uint32_t concat_size);
+
+  virtual uint32_t Push(Handle<JSArray> receiver,
+                        Handle<FixedArrayBase> backing_store, Arguments* args,
+                        uint32_t push_size) = 0;
+
+  virtual uint32_t Unshift(Handle<JSArray> receiver,
+                           Handle<FixedArrayBase> backing_store,
+                           Arguments* args, uint32_t unshift_size) = 0;
+
+  virtual Handle<JSArray> Slice(Handle<JSObject> receiver,
+                                Handle<FixedArrayBase> backing_store,
+                                uint32_t start, uint32_t end) = 0;
+
+  virtual Handle<JSArray> Splice(Handle<JSArray> receiver,
+                                 Handle<FixedArrayBase> backing_store,
+                                 uint32_t start, uint32_t delete_count,
+                                 Arguments* args, uint32_t add_count) = 0;
+
+  virtual Handle<Object> Pop(Handle<JSArray> receiver,
+                             Handle<FixedArrayBase> backing_store) = 0;
+
+  virtual Handle<Object> Shift(Handle<JSArray> receiver,
+                               Handle<FixedArrayBase> backing_store) = 0;
 
  protected:
   friend class LookupIterator;
 
   static ElementsAccessor* ForArray(FixedArrayBase* array);
 
-  virtual uint32_t GetCapacity(JSObject* holder,
-                               FixedArrayBase* backing_store) = 0;
 
   // Element handlers distinguish between entries and indices when they
   // manipulate elements. Entries refer to elements in terms of their location
@@ -143,6 +200,8 @@ class ElementsAccessor {
                                      uint32_t entry) = 0;
 
  private:
+  virtual uint32_t GetCapacity(JSObject* holder,
+                               FixedArrayBase* backing_store) = 0;
   static ElementsAccessor** elements_accessors_;
   const char* name_;
 
@@ -156,6 +215,7 @@ MUST_USE_RESULT MaybeHandle<Object> ArrayConstructInitializeElements(
     Handle<JSArray> array,
     Arguments* args);
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ELEMENTS_H_

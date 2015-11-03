@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/arm64/interface-descriptors-arm64.h"
 
 #if V8_TARGET_ARCH_ARM64
 
@@ -33,37 +33,36 @@ const Register VectorStoreICTrampolineDescriptor::SlotRegister() { return x4; }
 const Register VectorStoreICDescriptor::VectorRegister() { return x3; }
 
 
+const Register VectorStoreTransitionDescriptor::SlotRegister() { return x4; }
+const Register VectorStoreTransitionDescriptor::VectorRegister() { return x3; }
+const Register VectorStoreTransitionDescriptor::MapRegister() { return x5; }
+
+
 const Register StoreTransitionDescriptor::MapRegister() { return x3; }
 
 
-const Register LoadGlobalViaContextDescriptor::DepthRegister() { return x1; }
 const Register LoadGlobalViaContextDescriptor::SlotRegister() { return x2; }
-const Register LoadGlobalViaContextDescriptor::NameRegister() { return x3; }
 
 
-const Register StoreGlobalViaContextDescriptor::DepthRegister() { return x1; }
 const Register StoreGlobalViaContextDescriptor::SlotRegister() { return x2; }
-const Register StoreGlobalViaContextDescriptor::NameRegister() { return x3; }
 const Register StoreGlobalViaContextDescriptor::ValueRegister() { return x0; }
 
 
-const Register ElementTransitionAndStoreDescriptor::MapRegister() { return x3; }
+const Register InstanceOfDescriptor::LeftRegister() { return x1; }
+const Register InstanceOfDescriptor::RightRegister() { return x0; }
 
 
-const Register InstanceofDescriptor::left() {
-  // Object to check (instanceof lhs).
-  return x11;
-}
-
-
-const Register InstanceofDescriptor::right() {
-  // Constructor function (instanceof rhs).
-  return x10;
-}
+const Register StringCompareDescriptor::LeftRegister() { return x1; }
+const Register StringCompareDescriptor::RightRegister() { return x0; }
 
 
 const Register ArgumentsAccessReadDescriptor::index() { return x1; }
 const Register ArgumentsAccessReadDescriptor::parameter_count() { return x0; }
+
+
+const Register ArgumentsAccessNewDescriptor::function() { return x1; }
+const Register ArgumentsAccessNewDescriptor::parameter_count() { return x2; }
+const Register ArgumentsAccessNewDescriptor::parameter_pointer() { return x3; }
 
 
 const Register ApiGetterDescriptor::function_address() { return x2; }
@@ -101,6 +100,18 @@ void ToNumberDescriptor::InitializePlatformSpecific(
   Register registers[] = {x0};
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+// static
+const Register ToLengthDescriptor::ReceiverRegister() { return x0; }
+
+
+// static
+const Register ToStringDescriptor::ReceiverRegister() { return x0; }
+
+
+// static
+const Register ToObjectDescriptor::ReceiverRegister() { return x0; }
 
 
 void NumberToStringDescriptor::InitializePlatformSpecific(
@@ -201,6 +212,15 @@ void CallConstructDescriptor::InitializePlatformSpecific(
 }
 
 
+void CallTrampolineDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  // x1: target
+  // x0: number of arguments
+  Register registers[] = {x1, x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
 void RegExpConstructResultDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   // x2: length
@@ -223,6 +243,13 @@ void TransitionElementsKindDescriptor::InitializePlatformSpecific(
 void AllocateHeapNumberDescriptor::InitializePlatformSpecific(
     CallInterfaceDescriptorData* data) {
   data->InitializePlatformSpecific(0, nullptr, nullptr);
+}
+
+
+void AllocateInNewSpaceDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {x0};
+  data->InitializePlatformSpecific(arraysize(registers), registers);
 }
 
 
@@ -420,6 +447,42 @@ void MathRoundVariantCallFromOptimizedCodeDescriptor::
   };
   data->InitializePlatformSpecific(arraysize(registers), registers);
 }
+
+
+void InterpreterPushArgsAndCallDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,  // argument count (not including receiver)
+      x2,  // address of first argument
+      x1   // the target callable to be call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterPushArgsAndConstructDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,  // argument count (not including receiver)
+      x3,  // original constructor
+      x1,  // constructor to call
+      x2   // address of the first argument
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
+void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+    CallInterfaceDescriptorData* data) {
+  Register registers[] = {
+      x0,   // argument count (argc)
+      x11,  // address of first argument (argv)
+      x1    // the runtime function to call
+  };
+  data->InitializePlatformSpecific(arraysize(registers), registers);
+}
+
+
 }  // namespace internal
 }  // namespace v8
 

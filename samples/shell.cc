@@ -76,6 +76,7 @@ class ShellArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 
 int main(int argc, char* argv[]) {
   v8::V8::InitializeICU();
+  v8::V8::InitializeExternalStartupData(argv[0]);
   v8::Platform* platform = v8::platform::CreateDefaultPlatform();
   v8::V8::InitializePlatform(platform);
   v8::V8::Initialize();
@@ -411,9 +412,11 @@ void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch) {
       fprintf(stderr, "^");
     }
     fprintf(stderr, "\n");
-    v8::String::Utf8Value stack_trace(
-        try_catch->StackTrace(context).ToLocalChecked());
-    if (stack_trace.length() > 0) {
+    v8::Local<v8::Value> stack_trace_string;
+    if (try_catch->StackTrace(context).ToLocal(&stack_trace_string) &&
+        stack_trace_string->IsString() &&
+        v8::Local<v8::String>::Cast(stack_trace_string)->Length() > 0) {
+      v8::String::Utf8Value stack_trace(stack_trace_string);
       const char* stack_trace_string = ToCString(stack_trace);
       fprintf(stderr, "%s\n", stack_trace_string);
     }

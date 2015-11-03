@@ -166,7 +166,12 @@ class List {
   void StableSort();
 
   INLINE(void Initialize(int capacity,
-                         AllocationPolicy allocator = AllocationPolicy()));
+                         AllocationPolicy allocator = AllocationPolicy())) {
+    DCHECK(capacity >= 0);
+    data_ = (capacity > 0) ? NewData(capacity, allocator) : NULL;
+    capacity_ = capacity;
+    length_ = 0;
+  }
 
  private:
   T* data_;
@@ -224,7 +229,8 @@ template <typename T>
 int SortedListBSearch(const List<T>& list, T elem);
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 
 #endif  // V8_LIST_H_

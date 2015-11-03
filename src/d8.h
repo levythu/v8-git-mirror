@@ -7,9 +7,9 @@
 
 #ifndef V8_SHARED
 #include "src/allocation.h"
+#include "src/base/platform/time.h"
 #include "src/hashmap.h"
 #include "src/list.h"
-#include "src/v8.h"
 #else
 #include "include/v8.h"
 #include "src/base/compiler-specific.h"
@@ -93,26 +93,6 @@ class CounterMap {
 #endif  // !V8_SHARED
 
 
-class LineEditor {
- public:
-  enum Type { DUMB = 0, READLINE = 1 };
-  LineEditor(Type type, const char* name);
-  virtual ~LineEditor() { }
-
-  virtual Local<String> Prompt(const char* prompt) = 0;
-  virtual bool Open(Isolate* isolate) { return true; }
-  virtual bool Close() { return true; }
-  virtual void AddHistory(const char* str) { }
-
-  const char* name() { return name_; }
-  static LineEditor* Get() { return current_; }
- private:
-  Type type_;
-  const char* name_;
-  static LineEditor* current_;
-};
-
-
 class SourceGroup {
  public:
   SourceGroup() :
@@ -139,6 +119,7 @@ class SourceGroup {
 #ifndef V8_SHARED
   void StartExecuteInThread();
   void WaitForThread();
+  void JoinThread();
 
  private:
   class IsolateThread : public base::Thread {
@@ -241,19 +222,25 @@ class Worker {
   Worker();
   ~Worker();
 
-  void StartExecuteInThread(Isolate* isolate, const char* script);
+  // Run the given script on this Worker. This function should only be called
+  // once, and should only be called by the thread that created the Worker.
+  void StartExecuteInThread(const char* script);
   // Post a message to the worker's incoming message queue. The worker will
   // take ownership of the SerializationData.
+  // This function should only be called by the thread that created the Worker.
   void PostMessage(SerializationData* data);
   // Synchronously retrieve messages from the worker's outgoing message queue.
   // If there is no message in the queue, block until a message is available.
   // If there are no messages in the queue and the worker is no longer running,
   // return nullptr.
+  // This function should only be called by the thread that created the Worker.
   SerializationData* GetMessage();
   // Terminate the worker's event loop. Messages from the worker that have been
   // queued can still be read via GetMessage().
+  // This function can be called by any thread.
   void Terminate();
   // Terminate and join the thread.
+  // This function can be called by any thread.
   void WaitForThread();
 
  private:
@@ -269,12 +256,6 @@ class Worker {
     Worker* worker_;
   };
 
-  enum State {
-    IDLE,       // The worker thread hasn't been started yet
-    RUNNING,    // The worker thread is running and hasn't been terminated
-    TERMINATED  // The worker thread has been terminated and will soon finish
-  };
-
   void ExecuteInThread();
   static void PostMessageOut(const v8::FunctionCallbackInfo<v8::Value>& args);
 
@@ -284,8 +265,7 @@ class Worker {
   SerializationDataQueue out_queue_;
   base::Thread* thread_;
   char* script_;
-  base::Atomic32 state_;
-  base::Atomic32 join_called_;
+  base::Atomic32 running_;
 };
 #endif  // !V8_SHARED
 
@@ -294,12 +274,12 @@ class ShellOptions {
  public:
   ShellOptions()
       : script_executed(false),
-        last_run(true),
         send_idle_notification(false),
         invoke_weak_callbacks(false),
         omit_quit(false),
         stress_opt(false),
         stress_deopt(false),
+        stress_runs(1),
         interactive_shell(false),
         test_shell(false),
         dump_heap_constants(false),
@@ -321,12 +301,12 @@ class ShellOptions {
   }
 
   bool script_executed;
-  bool last_run;
   bool send_idle_notification;
   bool invoke_weak_callbacks;
   bool omit_quit;
   bool stress_opt;
   bool stress_deopt;
+  int stress_runs;
   bool interactive_shell;
   bool test_shell;
   bool dump_heap_constants;
@@ -361,7 +341,7 @@ class Shell : public i::AllStatic {
   static void ReportException(Isolate* isolate, TryCatch* try_catch);
   static Local<String> ReadFile(Isolate* isolate, const char* name);
   static Local<Context> CreateEvaluationContext(Isolate* isolate);
-  static int RunMain(Isolate* isolate, int argc, char* argv[]);
+  static int RunMain(Isolate* isolate, int argc, char* argv[], bool last_run);
   static int Main(int argc, char* argv[]);
   static void Exit(int exit_code);
   static void OnExit(Isolate* isolate);
@@ -380,8 +360,6 @@ class Shell : public i::AllStatic {
                                             const SerializationData& data,
                                             int* offset);
   static void CleanupWorkers();
-  static Local<Array> GetCompletions(Isolate* isolate, Local<String> text,
-                                     Local<String> full);
   static int* LookupCounter(const char* name);
   static void* CreateHistogram(const char* name,
                                int min,
@@ -389,11 +367,6 @@ class Shell : public i::AllStatic {
                                size_t buckets);
   static void AddHistogramSample(void* histogram, int sample);
   static void MapCounters(v8::Isolate* isolate, const char* name);
-
-  static Local<Object> DebugMessageDetails(Isolate* isolate,
-                                           Local<String> message);
-  static Local<Value> DebugCommandToJSONRequest(Isolate* isolate,
-                                                Local<String> command);
 
   static void PerformanceNow(const v8::FunctionCallbackInfo<v8::Value>& args);
 #endif  // !V8_SHARED
@@ -492,7 +465,6 @@ class Shell : public i::AllStatic {
   static void InstallUtilityScript(Isolate* isolate);
 #endif  // !V8_SHARED
   static void Initialize(Isolate* isolate);
-  static void InitializeDebugger(Isolate* isolate);
   static void RunShell(Isolate* isolate);
   static bool SetOptions(int argc, char* argv[]);
   static Local<ObjectTemplate> CreateGlobalTemplate(Isolate* isolate);

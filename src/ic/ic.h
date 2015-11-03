@@ -12,45 +12,11 @@
 namespace v8 {
 namespace internal {
 
-
-// IC_UTIL_LIST defines all utility functions called from generated
-// inline caching code. The argument for the macro, ICU, is the function name.
-#define IC_UTIL_LIST(ICU)              \
-  ICU(LoadIC_Miss)                     \
-  ICU(KeyedLoadIC_Miss)                \
-  ICU(CallIC_Miss)                     \
-  ICU(CallIC_Customization_Miss)       \
-  ICU(StoreIC_Miss)                    \
-  ICU(StoreIC_Slow)                    \
-  ICU(KeyedStoreIC_Miss)               \
-  ICU(KeyedStoreIC_Slow)               \
-  /* Utilities for IC stubs. */        \
-  ICU(StoreCallbackProperty)           \
-  ICU(LoadPropertyWithInterceptorOnly) \
-  ICU(LoadPropertyWithInterceptor)     \
-  ICU(LoadElementWithInterceptor)      \
-  ICU(StorePropertyWithInterceptor)    \
-  ICU(CompareIC_Miss)                  \
-  ICU(BinaryOpIC_Miss)                 \
-  ICU(CompareNilIC_Miss)               \
-  ICU(Unreachable)                     \
-  ICU(ToBooleanIC_Miss)
 //
 // IC is the base class for LoadIC, StoreIC, KeyedLoadIC, and KeyedStoreIC.
 //
 class IC {
  public:
-  // The ids for utility called from the generated code.
-  enum UtilityId {
-#define CONST_NAME(name) k##name,
-    IC_UTIL_LIST(CONST_NAME)
-#undef CONST_NAME
-    kUtilityCount
-  };
-
-  // Looks up the address of the named utility.
-  static Address AddressFromUtilityId(UtilityId id);
-
   // Alias the inline cache state type to make the IC code more readable.
   typedef InlineCacheState State;
 
@@ -60,8 +26,7 @@ class IC {
 
   // Construct the IC structure with the given number of extra
   // JavaScript frames on the stack.
-  IC(FrameDepth depth, Isolate* isolate, FeedbackNexus* nexus = NULL,
-     bool for_queries_only = false);
+  IC(FrameDepth depth, Isolate* isolate, FeedbackNexus* nexus = NULL);
   virtual ~IC() {}
 
   State state() const { return state_; }
@@ -92,8 +57,6 @@ class IC {
   bool IsCallStub() const { return target()->is_call_stub(); }
 #endif
 
-  static inline JSFunction* GetRootConstructor(Map* receiver_map,
-                                               Context* native_context);
   static inline Handle<Map> GetHandlerCacheHolder(Handle<Map> receiver_map,
                                                   bool receiver_is_holder,
                                                   Isolate* isolate,
@@ -156,6 +119,11 @@ class IC {
                             Handle<Code> handler);
   // Configure the vector for POLYMORPHIC.
   void ConfigureVectorState(Handle<Name> name, MapHandleList* maps,
+                            CodeHandleList* handlers);
+  // Configure the vector for POLYMORPHIC with transitions (only for element
+  // keyed stores).
+  void ConfigureVectorState(MapHandleList* maps,
+                            MapHandleList* transitioned_maps,
                             CodeHandleList* handlers);
 
   char TransitionMarkFromState(IC::State state);
@@ -240,7 +208,7 @@ class IC {
   inline void UpdateTarget();
 
   Handle<TypeFeedbackVector> vector() const { return nexus()->vector_handle(); }
-  FeedbackVectorICSlot slot() const { return nexus()->slot(); }
+  FeedbackVectorSlot slot() const { return nexus()->slot(); }
   State saved_state() const {
     return state() == PROTOTYPE_FAILURE ? old_state_ : state();
   }
@@ -308,23 +276,6 @@ class IC {
 };
 
 
-// An IC_Utility encapsulates IC::UtilityId. It exists mainly because you
-// cannot make forward declarations to an enum.
-class IC_Utility {
- public:
-  explicit IC_Utility(IC::UtilityId id)
-      : address_(IC::AddressFromUtilityId(id)), id_(id) {}
-
-  Address address() const { return address_; }
-
-  IC::UtilityId id() const { return id_; }
-
- private:
-  Address address_;
-  IC::UtilityId id_;
-};
-
-
 class CallIC : public IC {
  public:
   CallIC(Isolate* isolate, CallICNexus* nexus)
@@ -332,13 +283,7 @@ class CallIC : public IC {
     DCHECK(nexus != NULL);
   }
 
-  void PatchMegamorphic(Handle<Object> function);
-
   void HandleMiss(Handle<Object> function);
-
-  // Returns true if a custom handler was installed.
-  bool DoCustomHandler(Handle<Object> function,
-                       const CallICState& callic_state);
 
   // Code generator routines.
   static Handle<Code> initialize_stub(Isolate* isolate, int argc,
@@ -371,20 +316,12 @@ class LoadIC : public IC {
     DCHECK(IsLoadStub());
   }
 
-  // TODO(mvstanton): The for_queries_only is because we have a case where we
-  // construct an IC only to gather the contextual mode, and we don't have
-  // vector/slot information. for_queries_only is a temporary hack to enable the
-  // strong DCHECK protection around vector/slot.
-  LoadIC(FrameDepth depth, Isolate* isolate, bool for_queries_only)
-      : IC(depth, isolate, NULL, for_queries_only) {
-    DCHECK(IsLoadStub());
-  }
-
   bool ShouldThrowReferenceError(Handle<Object> receiver) {
-    return receiver->IsGlobalObject() && typeof_mode() == NOT_INSIDE_TYPEOF;
+    return receiver->IsJSGlobalObject() && typeof_mode() == NOT_INSIDE_TYPEOF;
   }
 
   // Code generator routines.
+
   static void GenerateInitialize(MacroAssembler* masm) { GenerateMiss(masm); }
   static void GenerateMiss(MacroAssembler* masm);
   static void GenerateRuntimeGetProperty(MacroAssembler* masm,
@@ -586,9 +523,9 @@ class KeyedStoreIC : public StoreIC {
   // When more language modes are added, these BitFields need to move too.
   STATIC_ASSERT(i::LANGUAGE_END == 3);
   class ExtraICStateKeyedAccessStoreMode
-      : public BitField<KeyedAccessStoreMode, 3, 4> {};  // NOLINT
+      : public BitField<KeyedAccessStoreMode, 3, 3> {};  // NOLINT
 
-  class IcCheckTypeField : public BitField<IcCheckType, 7, 1> {};
+  class IcCheckTypeField : public BitField<IcCheckType, 6, 1> {};
 
   static ExtraICState ComputeExtraICState(LanguageMode flag,
                                           KeyedAccessStoreMode mode) {
@@ -599,10 +536,17 @@ class KeyedStoreIC : public StoreIC {
 
   static KeyedAccessStoreMode GetKeyedAccessStoreMode(
       ExtraICState extra_state) {
+    DCHECK(!FLAG_vector_stores);
     return ExtraICStateKeyedAccessStoreMode::decode(extra_state);
   }
 
+  KeyedAccessStoreMode GetKeyedAccessStoreMode() {
+    DCHECK(FLAG_vector_stores);
+    return casted_nexus<KeyedStoreICNexus>()->GetKeyedAccessStoreMode();
+  }
+
   static IcCheckType GetKeyType(ExtraICState extra_state) {
+    DCHECK(!FLAG_vector_stores);
     return IcCheckTypeField::decode(extra_state);
   }
 
@@ -632,6 +576,8 @@ class KeyedStoreIC : public StoreIC {
 
   static Handle<Code> initialize_stub_in_optimized_code(
       Isolate* isolate, LanguageMode language_mode, State initialization_state);
+  static Handle<Code> ChooseMegamorphicStub(Isolate* isolate,
+                                            ExtraICState extra_state);
 
   static void Clear(Isolate* isolate, Code* host, KeyedStoreICNexus* nexus);
 
@@ -648,7 +594,7 @@ class KeyedStoreIC : public StoreIC {
     }
   }
 
-  Handle<Code> StoreElementStub(Handle<JSObject> receiver,
+  Handle<Code> StoreElementStub(Handle<Map> receiver_map,
                                 KeyedAccessStoreMode store_mode);
 
  private:
@@ -660,6 +606,8 @@ class KeyedStoreIC : public StoreIC {
   Handle<Map> ComputeTransitionedMap(Handle<Map> map,
                                      KeyedAccessStoreMode store_mode);
 
+  void ValidateStoreMode(Handle<Code> stub);
+
   friend class IC;
 };
 
@@ -668,9 +616,6 @@ class KeyedStoreIC : public StoreIC {
 class BinaryOpIC : public IC {
  public:
   explicit BinaryOpIC(Isolate* isolate) : IC(EXTRA_CALL_FRAME, isolate) {}
-
-  static Builtins::JavaScript TokenToJSBuiltin(Token::Value op,
-                                               Strength strength);
 
   MaybeHandle<Object> Transition(Handle<AllocationSite> allocation_site,
                                  Handle<Object> left,
@@ -738,26 +683,7 @@ class ToBooleanIC : public IC {
 enum InlinedSmiCheck { ENABLE_INLINED_SMI_CHECK, DISABLE_INLINED_SMI_CHECK };
 void PatchInlinedSmiCode(Address address, InlinedSmiCheck check);
 
-DECLARE_RUNTIME_FUNCTION(KeyedLoadIC_MissFromStubFailure);
-DECLARE_RUNTIME_FUNCTION(KeyedStoreIC_MissFromStubFailure);
-DECLARE_RUNTIME_FUNCTION(UnaryOpIC_Miss);
-DECLARE_RUNTIME_FUNCTION(StoreIC_MissFromStubFailure);
-DECLARE_RUNTIME_FUNCTION(ElementsTransitionAndStoreIC_Miss);
-DECLARE_RUNTIME_FUNCTION(BinaryOpIC_Miss);
-DECLARE_RUNTIME_FUNCTION(BinaryOpIC_MissWithAllocationSite);
-DECLARE_RUNTIME_FUNCTION(CompareNilIC_Miss);
-DECLARE_RUNTIME_FUNCTION(ToBooleanIC_Miss);
-DECLARE_RUNTIME_FUNCTION(LoadIC_MissFromStubFailure);
-
-// Support functions for callbacks handlers.
-DECLARE_RUNTIME_FUNCTION(StoreCallbackProperty);
-
-// Support functions for interceptor handlers.
-DECLARE_RUNTIME_FUNCTION(LoadPropertyWithInterceptorOnly);
-DECLARE_RUNTIME_FUNCTION(LoadPropertyWithInterceptor);
-DECLARE_RUNTIME_FUNCTION(LoadElementWithInterceptor);
-DECLARE_RUNTIME_FUNCTION(StorePropertyWithInterceptor);
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_IC_H_

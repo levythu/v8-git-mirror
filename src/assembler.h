@@ -35,22 +35,23 @@
 #ifndef V8_ASSEMBLER_H_
 #define V8_ASSEMBLER_H_
 
-#include "src/v8.h"
-
 #include "src/allocation.h"
 #include "src/builtins.h"
-#include "src/gdb-jit.h"
 #include "src/isolate.h"
 #include "src/runtime/runtime.h"
 #include "src/token.h"
 
 namespace v8 {
 
+// Forward declarations.
 class ApiFunction;
 
 namespace internal {
 
+// Forward declarations.
+class SourcePosition;
 class StatsCounter;
+
 // -----------------------------------------------------------------------------
 // Platform independent assembler base class.
 
@@ -100,6 +101,11 @@ class AssemblerBase: public Malloced {
   virtual void AbortedCodeGeneration() { }
 
   static const int kMinimalBufferSize = 4*KB;
+
+  static void FlushICache(Isolate* isolate, void* start, size_t size);
+
+  // TODO(all): Help get rid of this one.
+  static void FlushICacheWithoutIsolate(void* start, size_t size);
 
  protected:
   // The buffer into which code and relocation info are generated. It could
@@ -313,6 +319,8 @@ class Label {
 
 
 enum SaveFPRegsMode { kDontSaveFPRegs, kSaveFPRegs };
+
+enum ArgvMode { kArgvOnStack, kArgvInRegister };
 
 // Specifies whether to perform icache flush operations on RelocInfo updates.
 // If FLUSH_ICACHE_IF_NEEDED, the icache will always be flushed if an
@@ -654,11 +662,6 @@ class RelocInfo {
   Mode rmode_;
   intptr_t data_;
   Code* host_;
-  // External-reference pointers are also split across instruction-pairs
-  // on some platforms, but are accessed via indirect pointers. This location
-  // provides a place for that pointer to exist naturally. Its address
-  // is returned by RelocInfo::target_reference_address().
-  Address reconstructed_adr_ptr_;
   friend class RelocIterator;
 };
 
@@ -805,7 +808,6 @@ class RelocIterator: public Malloced {
 // External function
 
 //----------------------------------------------------------------------------
-class IC_Utility;
 class SCTableReference;
 class Debug_Address;
 
@@ -875,8 +877,6 @@ class ExternalReference BASE_EMBEDDED {
 
   ExternalReference(const Runtime::Function* f, Isolate* isolate);
 
-  ExternalReference(const IC_Utility& ic_utility, Isolate* isolate);
-
   explicit ExternalReference(StatsCounter* counter);
 
   ExternalReference(Isolate::AddressId id, Isolate* isolate);
@@ -894,7 +894,6 @@ class ExternalReference BASE_EMBEDDED {
       Isolate* isolate);
   static ExternalReference store_buffer_overflow_function(
       Isolate* isolate);
-  static ExternalReference flush_icache_function(Isolate* isolate);
   static ExternalReference delete_handle_scope_extensions(Isolate* isolate);
 
   static ExternalReference get_date_field_function(Isolate* isolate);
@@ -989,10 +988,12 @@ class ExternalReference BASE_EMBEDDED {
   static ExternalReference invoke_function_callback(Isolate* isolate);
   static ExternalReference invoke_accessor_getter_callback(Isolate* isolate);
 
-  Address address() const { return reinterpret_cast<Address>(address_); }
+  static ExternalReference virtual_handler_register(Isolate* isolate);
+  static ExternalReference virtual_slot_register(Isolate* isolate);
 
-  // Function Debug::Break()
-  static ExternalReference debug_break(Isolate* isolate);
+  static ExternalReference runtime_function_table_address(Isolate* isolate);
+
+  Address address() const { return reinterpret_cast<Address>(address_); }
 
   // Used to check if single stepping is enabled in generated code.
   static ExternalReference debug_step_in_fp_address(Isolate* isolate);
@@ -1025,6 +1026,8 @@ class ExternalReference BASE_EMBEDDED {
   }
 
   static ExternalReference stress_deopt_count(Isolate* isolate);
+
+  static ExternalReference fixed_typed_array_base_data_offset();
 
  private:
   explicit ExternalReference(void* address)
@@ -1274,7 +1277,6 @@ class ConstantPoolBuilder BASE_EMBEDDED {
   PerTypeEntryInfo info_[ConstantPoolEntry::NUMBER_OF_TYPES];
 };
 
-
-} }  // namespace v8::internal
-
+}  // namespace internal
+}  // namespace v8
 #endif  // V8_ASSEMBLER_H_

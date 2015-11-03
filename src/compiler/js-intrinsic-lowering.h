@@ -7,7 +7,6 @@
 
 #include "src/compiler/common-operator.h"
 #include "src/compiler/graph-reducer.h"
-#include "src/compiler/simplified-operator.h"
 
 namespace v8 {
 namespace internal {
@@ -18,6 +17,7 @@ class CommonOperatorBuilder;
 class JSOperatorBuilder;
 class JSGraph;
 class MachineOperatorBuilder;
+class SimplifiedOperatorBuilder;
 
 
 // Lowers certain JS-level runtime calls.
@@ -41,7 +41,6 @@ class JSIntrinsicLowering final : public AdvancedReducer {
   Reduction ReduceIncrementStatsCounter(Node* node);
   Reduction ReduceIsMinusZero(Node* node);
   Reduction ReduceIsInstanceType(Node* node, InstanceType instance_type);
-  Reduction ReduceIsNonNegativeSmi(Node* node);
   Reduction ReduceIsSmi(Node* node);
   Reduction ReduceJSValueGetValue(Node* node);
   Reduction ReduceMapGetInstanceType(Node* node);
@@ -58,6 +57,7 @@ class JSIntrinsicLowering final : public AdvancedReducer {
   Reduction ReduceGetTypeFeedbackVector(Node* node);
   Reduction ReduceGetCallerJSFunction(Node* node);
   Reduction ReduceThrowNotDateError(Node* node);
+  Reduction ReduceToObject(Node* node);
   Reduction ReduceCallFunction(Node* node);
 
   Reduction Change(Node* node, const Operator* op);
@@ -72,12 +72,11 @@ class JSIntrinsicLowering final : public AdvancedReducer {
   CommonOperatorBuilder* common() const;
   JSOperatorBuilder* javascript() const;
   MachineOperatorBuilder* machine() const;
+  SimplifiedOperatorBuilder* simplified() const;
   DeoptimizationMode mode() const { return mode_; }
-  SimplifiedOperatorBuilder* simplified() { return &simplified_; }
 
   JSGraph* const jsgraph_;
   DeoptimizationMode const mode_;
-  SimplifiedOperatorBuilder simplified_;
 };
 
 }  // namespace compiler

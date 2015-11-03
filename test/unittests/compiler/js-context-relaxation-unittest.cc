@@ -20,7 +20,8 @@ class JSContextRelaxationTest : public GraphTest {
   Reduction Reduce(Node* node, MachineOperatorBuilder::Flags flags =
                                    MachineOperatorBuilder::kNoFlags) {
     MachineOperatorBuilder machine(zone(), kMachPtr, flags);
-    JSGraph jsgraph(isolate(), graph(), common(), javascript(), &machine);
+    JSGraph jsgraph(isolate(), graph(), common(), javascript(), nullptr,
+                    &machine);
     // TODO(titzer): mock the GraphReducer here for better unit testing.
     GraphReducer graph_reducer(zone(), graph());
     JSContextRelaxation reducer;
@@ -29,7 +30,8 @@ class JSContextRelaxationTest : public GraphTest {
 
   Node* EmptyFrameState() {
     MachineOperatorBuilder machine(zone());
-    JSGraph jsgraph(isolate(), graph(), common(), javascript(), &machine);
+    JSGraph jsgraph(isolate(), graph(), common(), javascript(), nullptr,
+                    &machine);
     return jsgraph.EmptyFrameState();
   }
 
@@ -80,10 +82,10 @@ TEST_F(JSContextRelaxationTest,
       ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state, frame_state, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(outer_context, NodeProperties::GetContextInput(node));
@@ -99,10 +101,10 @@ TEST_F(JSContextRelaxationTest,
       ShallowFrameStateChain(outer_context, CALL_CHANGES_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state, frame_state, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_FALSE(r.Changed());
   EXPECT_EQ(context, NodeProperties::GetContextInput(node));
@@ -118,10 +120,10 @@ TEST_F(JSContextRelaxationTest,
       DeepFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state, frame_state, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(outer_context, NodeProperties::GetContextInput(node));
@@ -137,10 +139,10 @@ TEST_F(JSContextRelaxationTest,
       DeepFrameStateChain(outer_context, CALL_CHANGES_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state, frame_state, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_FALSE(r.Changed());
   EXPECT_EQ(context, NodeProperties::GetContextInput(node));
@@ -152,20 +154,17 @@ TEST_F(JSContextRelaxationTest,
   Node* const input1 = Parameter(1);
   Node* const context = Parameter(2);
   Node* const outer_context = Parameter(3);
-  const Operator* op = javascript()->CreateCatchContext(Unique<String>());
-  Node* const frame_state_1 =
-      ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
+  const Operator* op = javascript()->CreateCatchContext(Handle<String>());
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* nested_context =
-      graph()->NewNode(op, graph()->start(), graph()->start(), outer_context,
-                       frame_state_1, effect, control);
+  Node* nested_context = graph()->NewNode(
+      op, graph()->start(), graph()->start(), outer_context, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(outer_context, NodeProperties::GetContextInput(node));
@@ -188,10 +187,10 @@ TEST_F(JSContextRelaxationTest,
                        frame_state_1, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(outer_context, NodeProperties::GetContextInput(node));
@@ -204,20 +203,18 @@ TEST_F(JSContextRelaxationTest,
   Node* const input1 = Parameter(1);
   Node* const context = Parameter(2);
   Node* const outer_context = Parameter(3);
-  const Operator* op = javascript()->CreateBlockContext();
-  Node* const frame_state_1 =
-      ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
+  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::null();
+  const Operator* op = javascript()->CreateBlockContext(scope_info);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
   Node* nested_context =
-      graph()->NewNode(op, graph()->start(), graph()->start(), outer_context,
-                       frame_state_1, effect, control);
+      graph()->NewNode(op, graph()->start(), outer_context, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(outer_context, NodeProperties::GetContextInput(node));
@@ -230,20 +227,20 @@ TEST_F(JSContextRelaxationTest,
   Node* const input1 = Parameter(1);
   Node* const context = Parameter(2);
   Node* const outer_context = Parameter(3);
-  const Operator* op = javascript()->CreateScriptContext();
+  Handle<ScopeInfo> scope_info = Handle<ScopeInfo>::null();
+  const Operator* op = javascript()->CreateScriptContext(scope_info);
   Node* const frame_state_1 =
       ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* nested_context =
-      graph()->NewNode(op, graph()->start(), graph()->start(), outer_context,
-                       frame_state_1, effect, control);
+  Node* nested_context = graph()->NewNode(op, graph()->start(), outer_context,
+                                          frame_state_1, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(nested_context, NodeProperties::GetContextInput(node));
@@ -257,19 +254,16 @@ TEST_F(JSContextRelaxationTest,
   Node* const context = Parameter(2);
   Node* const outer_context = Parameter(3);
   const Operator* op = javascript()->CreateModuleContext();
-  Node* const frame_state_1 =
-      ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Node* nested_context =
-      graph()->NewNode(op, graph()->start(), graph()->start(), outer_context,
-                       frame_state_1, effect, control);
+  Node* nested_context = graph()->NewNode(
+      op, graph()->start(), graph()->start(), outer_context, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_TRUE(r.Changed());
   EXPECT_EQ(nested_context, NodeProperties::GetContextInput(node));
@@ -282,20 +276,17 @@ TEST_F(JSContextRelaxationTest,
   Node* const input1 = Parameter(1);
   Node* const context = Parameter(2);
   Node* const outer_context = Parameter(3);
-  const Operator* op = javascript()->CreateFunctionContext();
-  Node* const frame_state_1 =
-      ShallowFrameStateChain(outer_context, CALL_MAINTAINS_NATIVE_CONTEXT);
+  const Operator* op = javascript()->CreateFunctionContext(0);
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
   Node* nested_context =
-      graph()->NewNode(op, graph()->start(), graph()->start(), outer_context,
-                       frame_state_1, effect, control);
+      graph()->NewNode(op, graph()->start(), outer_context, effect, control);
   Node* const frame_state_2 =
       ShallowFrameStateChain(nested_context, CALL_MAINTAINS_NATIVE_CONTEXT);
-  Node* node =
-      graph()->NewNode(javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS,
-                                                  STRICT, VectorSlotPair()),
-                       input0, input1, context, frame_state_2, effect, control);
+  Node* node = graph()->NewNode(
+      javascript()->CallFunction(2, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                 VectorSlotPair()),
+      input0, input1, context, frame_state_2, frame_state_2, effect, control);
   Reduction const r = Reduce(node);
   EXPECT_FALSE(r.Changed());
   EXPECT_EQ(context, NodeProperties::GetContextInput(node));

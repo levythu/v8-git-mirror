@@ -67,7 +67,6 @@ def _V8PresubmitChecks(input_api, output_api):
         input_api.PresubmitLocalPath(), 'tools'))
   from presubmit import CppLintProcessor
   from presubmit import SourceProcessor
-  from presubmit import CheckRuntimeVsNativesNameClashes
   from presubmit import CheckExternalReferenceRegistration
   from presubmit import CheckAuthorizedAuthor
 
@@ -78,9 +77,6 @@ def _V8PresubmitChecks(input_api, output_api):
     results.append(output_api.PresubmitError(
         "Copyright header, trailing whitespaces and two empty lines " \
         "between declarations check failed"))
-  if not CheckRuntimeVsNativesNameClashes(input_api.PresubmitLocalPath()):
-    results.append(output_api.PresubmitError(
-        "Runtime/natives name clash check failed"))
   if not CheckExternalReferenceRegistration(input_api.PresubmitLocalPath()):
     results.append(output_api.PresubmitError(
         "External references registration check failed"))
@@ -141,6 +137,39 @@ def _CheckUnwantedDependencies(input_api, output_api):
   return results
 
 
+def _CheckNoInlineHeaderIncludesInNormalHeaders(input_api, output_api):
+  """Attempts to prevent inclusion of inline headers into normal header
+  files. This tries to establish a layering where inline headers can be
+  included by other inline headers or compilation units only."""
+  file_inclusion_pattern = r'(?!.+-inl\.h).+\.h'
+  include_directive_pattern = input_api.re.compile(r'#include ".+-inl.h"')
+  include_warning = (
+    'You might be including an inline header (e.g. foo-inl.h) within a\n'
+    'normal header (e.g. bar.h) file.  Can you avoid introducing the\n'
+    '#include?  The commit queue will not block on this warning.')
+
+  def FilterFile(affected_file):
+    black_list = (_EXCLUDED_PATHS +
+                  input_api.DEFAULT_BLACK_LIST)
+    return input_api.FilterSourceFile(
+      affected_file,
+      white_list=(file_inclusion_pattern, ),
+      black_list=black_list)
+
+  problems = []
+  for f in input_api.AffectedSourceFiles(FilterFile):
+    local_path = f.LocalPath()
+    for line_number, line in f.ChangedContents():
+      if (include_directive_pattern.search(line)):
+        problems.append(
+          '%s:%d\n    %s' % (local_path, line_number, line.strip()))
+
+  if problems:
+    return [output_api.PresubmitPromptOrNotify(include_warning, problems)]
+  else:
+    return []
+
+
 def _CheckNoProductionCodeUsingTestOnlyFunctions(input_api, output_api):
   """Attempts to prevent use of functions intended only for testing in
   non-testing code. For now this is just a best-effort implementation
@@ -195,6 +224,8 @@ def _CommonChecks(input_api, output_api):
   results.extend(_CheckUnwantedDependencies(input_api, output_api))
   results.extend(
       _CheckNoProductionCodeUsingTestOnlyFunctions(input_api, output_api))
+  results.extend(
+      _CheckNoInlineHeaderIncludesInNormalHeaders(input_api, output_api))
   return results
 
 
@@ -202,7 +233,6 @@ def _SkipTreeCheck(input_api, output_api):
   """Check the env var whether we want to skip tree check.
      Only skip if include/v8-version.h has been updated."""
   src_version = 'include/v8-version.h'
-  FilterFile = lambda file: file.LocalPath() == src_version
   if not input_api.AffectedSourceFiles(
       lambda file: file.LocalPath() == src_version):
     return False

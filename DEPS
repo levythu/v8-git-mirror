@@ -8,23 +8,32 @@ vars = {
 
 deps = {
   "v8/build/gyp":
-    Var("git_url") + "/external/gyp.git" + "@" + "5122240c5e5c4d8da12c543d82b03d6089eb77c5",
+    Var("git_url") + "/external/gyp.git" + "@" + "3f21260b43401553c37bb28090b65a75577d5b4e",
   "v8/third_party/icu":
-    Var("git_url") + "/chromium/deps/icu.git" + "@" + "508e9274baaa5caa8de9cf4c26a24e926a15ccf0",
+    Var("git_url") + "/chromium/deps/icu.git" + "@" + "94e4b770ce2f6065d4261d29c32683a6099b9d93",
   "v8/buildtools":
-    Var("git_url") + "/chromium/buildtools.git" + "@" + "125d157607de4d7c95bf8b02dd580aae17962f19",
+    Var("git_url") + "/chromium/buildtools.git" + "@" + "c2f259809d5ede3275df5ea0842f0431990c4f98",
+  "v8/tools/swarming_client":
+    Var('git_url') + '/external/swarming.client.git' + '@' + "8fce79620b04bbe5415ace1103db27505bdc4c06",
   "v8/testing/gtest":
-    Var("git_url") + "/external/googletest.git" + "@" + "00a70a9667d92a4695d84e4fa36b64f611f147da",
+    Var("git_url") + "/external/github.com/google/googletest.git" + "@" + "6f8a66431cb592dad629028a50b3dd418a408c87",
   "v8/testing/gmock":
-    Var("git_url") + "/external/googlemock.git" + "@" + "29763965ab52f24565299976b936d1265cb6a271",  # from svn revision 501
+    Var("git_url") + "/external/googlemock.git" + "@" + "0421b6f358139f02e102c9c332ce19a33faf75be",
+  "v8/test/benchmarks/data":
+    Var("git_url") + "/v8/deps/third_party/benchmarks.git" + "@" + "05d7188267b4560491ff9155c5ee13e207ecd65f",
+  "v8/test/mozilla/data":
+    Var("git_url") + "/v8/deps/third_party/mozilla-tests.git" + "@" + "f6c578a10ea707b1a8ab0b88943fe5115ce2b9be",
+  "v8/test/simdjs/data": Var("git_url") + "/external/github.com/tc39/ecmascript_simd.git" + "@" + "c8ef63c728283debc25891123eb00482fee4b8cd",
+  "v8/test/test262/data":
+    Var("git_url") + "/external/github.com/tc39/test262.git" + "@" + "ea222fb7d09e334c321b987656315ad4056ded96",
   "v8/tools/clang":
-    Var("git_url") + "/chromium/src/tools/clang.git" + "@" + "33c2e4149926da7262361323a111605877add859",
+    Var("git_url") + "/chromium/src/tools/clang.git" + "@" + "66f5328417331216569e8beb244fd887f62e8997",
 }
 
 deps_os = {
   "android": {
     "v8/third_party/android_tools":
-      Var("git_url") + "/android_tools.git" + "@" + "2abd22b08cd757f88362f44b02484de43e4b9611",
+      Var("git_url") + "/android_tools.git" + "@" + "54492f99c84cab0826a8e656efeb33a1b1bf5a04",
   },
   "win": {
     "v8/third_party/cygwin":
@@ -91,6 +100,46 @@ hooks = [
                 "-s", "v8/buildtools/linux64/clang-format.sha1",
     ],
   },
+  # Pull luci-go binaries (isolate, swarming) using checked-in hashes.
+  {
+    'name': 'luci-go_win',
+    'pattern': '.',
+    'action': [ 'download_from_google_storage',
+                '--no_resume',
+                '--platform=win32',
+                '--no_auth',
+                '--bucket', 'chromium-luci',
+                '-d', 'v8/tools/luci-go/win64',
+    ],
+  },
+  {
+    'name': 'luci-go_mac',
+    'pattern': '.',
+    'action': [ 'download_from_google_storage',
+                '--no_resume',
+                '--platform=darwin',
+                '--no_auth',
+                '--bucket', 'chromium-luci',
+                '-d', 'v8/tools/luci-go/mac64',
+    ],
+  },
+  {
+    'name': 'luci-go_linux',
+    'pattern': '.',
+    'action': [ 'download_from_google_storage',
+                '--no_resume',
+                '--platform=linux*',
+                '--no_auth',
+                '--bucket', 'chromium-luci',
+                '-d', 'v8/tools/luci-go/linux64',
+    ],
+  },
+  {
+    # Update the Windows toolchain if necessary.
+    'name': 'win_toolchain',
+    'pattern': '.',
+    'action': ['python', 'v8/build/vs_toolchain.py', 'update'],
+  },
   # Pull binutils for linux, enabled debug fission for faster linking /
   # debugging when used with clang on Ubuntu Precise.
   # https://code.google.com/p/chromium/issues/detail?id=352046
@@ -101,6 +150,13 @@ hooks = [
         'python',
         'v8/third_party/binutils/download.py',
     ],
+  },
+  {
+    # Pull gold plugin if needed or requested via GYP_DEFINES.
+    # Note: This must run before the clang update.
+    'name': 'gold_plugin',
+    'pattern': '.',
+    'action': ['python', 'v8/build/download_gold_plugin.py'],
   },
   {
     # Pull clang if needed or requested via GYP_DEFINES.

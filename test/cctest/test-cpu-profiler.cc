@@ -32,8 +32,8 @@
 #include "include/v8-profiler.h"
 #include "src/base/platform/platform.h"
 #include "src/base/smart-pointers.h"
-#include "src/cpu-profiler-inl.h"
 #include "src/deoptimizer.h"
+#include "src/profiler/cpu-profiler-inl.h"
 #include "src/utils.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/profiler-extension.h"
@@ -134,8 +134,8 @@ i::Code* CreateCode(LocalContext* env) {
        "%s();\n", name_start, counter, name_start, name_start);
   CompileRun(script.start());
 
-  i::Handle<i::JSFunction> fun =
-      v8::Utils::OpenHandle(*GetFunction(**env, name_start));
+  i::Handle<i::JSFunction> fun = i::Handle<i::JSFunction>::cast(
+      v8::Utils::OpenHandle(*GetFunction(**env, name_start)));
   return fun->code();
 }
 
@@ -1076,8 +1076,8 @@ TEST(TickLines) {
 
   CompileRun(script.start());
 
-  i::Handle<i::JSFunction> func =
-      v8::Utils::OpenHandle(*GetFunction(*env, func_name));
+  i::Handle<i::JSFunction> func = i::Handle<i::JSFunction>::cast(
+      v8::Utils::OpenHandle(*GetFunction(*env, func_name)));
   CHECK(func->shared());
   CHECK(func->shared()->code());
   i::Code* code = NULL;

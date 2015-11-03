@@ -62,6 +62,7 @@ namespace compiler {
   V(PPC_MinDouble)                 \
   V(PPC_AbsDouble)                 \
   V(PPC_Cntlz32)                   \
+  V(PPC_Popcnt32)                  \
   V(PPC_Cmp32)                     \
   V(PPC_Cmp64)                     \
   V(PPC_CmpDouble)                 \
@@ -86,6 +87,10 @@ namespace compiler {
   V(PPC_DoubleInsertLowWord32)     \
   V(PPC_DoubleInsertHighWord32)    \
   V(PPC_DoubleConstruct)           \
+  V(PPC_BitcastInt32ToFloat32)     \
+  V(PPC_BitcastFloat32ToInt32)     \
+  V(PPC_BitcastInt64ToDouble)      \
+  V(PPC_BitcastDoubleToInt64)      \
   V(PPC_LoadWordS8)                \
   V(PPC_LoadWordU8)                \
   V(PPC_LoadWordS16)               \

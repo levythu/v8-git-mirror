@@ -40,7 +40,7 @@
 #include "src/arm/assembler-arm.h"
 
 #include "src/assembler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 
 
 namespace v8 {
@@ -50,50 +50,8 @@ namespace internal {
 bool CpuFeatures::SupportsCrankshaft() { return IsSupported(VFP3); }
 
 
-int Register::NumAllocatableRegisters() {
-  return kMaxNumAllocatableRegisters;
-}
-
-
-int DwVfpRegister::NumRegisters() {
+int DoubleRegister::NumRegisters() {
   return CpuFeatures::IsSupported(VFP32DREGS) ? 32 : 16;
-}
-
-
-int DwVfpRegister::NumReservedRegisters() {
-  return kNumReservedRegisters;
-}
-
-
-int DwVfpRegister::NumAllocatableRegisters() {
-  return NumRegisters() - kNumReservedRegisters;
-}
-
-
-// static
-int DwVfpRegister::NumAllocatableAliasedRegisters() {
-  return LowDwVfpRegister::kMaxNumLowRegisters - kNumReservedRegisters;
-}
-
-
-int DwVfpRegister::ToAllocationIndex(DwVfpRegister reg) {
-  DCHECK(!reg.is(kDoubleRegZero));
-  DCHECK(!reg.is(kScratchDoubleReg));
-  if (reg.code() > kDoubleRegZero.code()) {
-    return reg.code() - kNumReservedRegisters;
-  }
-  return reg.code();
-}
-
-
-DwVfpRegister DwVfpRegister::FromAllocationIndex(int index) {
-  DCHECK(index >= 0 && index < NumAllocatableRegisters());
-  DCHECK(kScratchDoubleReg.code() - kDoubleRegZero.code() ==
-         kNumReservedRegisters - 1);
-  if (index >= kDoubleRegZero.code()) {
-    return from_code(index + kNumReservedRegisters);
-  }
-  return from_code(index);
 }
 
 
@@ -622,7 +580,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
     Memory::Address_at(constant_pool_entry_address(pc, constant_pool)) = target;
     // Intuitively, we would think it is necessary to always flush the
     // instruction cache after patching a target address in the code as follows:
-    //   CpuFeatures::FlushICache(pc, sizeof(target));
+    //   Assembler::FlushICacheWithoutIsolate(pc, sizeof(target));
     // However, on ARM, no instruction is actually patched in the case
     // of embedded constants of the form:
     // ldr   ip, [pp, #...]
@@ -640,7 +598,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
     DCHECK(IsMovW(Memory::int32_at(pc)));
     DCHECK(IsMovT(Memory::int32_at(pc + kInstrSize)));
     if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
-      CpuFeatures::FlushICache(pc, 2 * kInstrSize);
+      Assembler::FlushICacheWithoutIsolate(pc, 2 * kInstrSize);
     }
   } else {
     // This is an mov / orr immediate load. Patch the immediate embedded in
@@ -660,12 +618,13 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
            IsOrrImmed(Memory::int32_at(pc + 2 * kInstrSize)) &&
            IsOrrImmed(Memory::int32_at(pc + 3 * kInstrSize)));
     if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
-      CpuFeatures::FlushICache(pc, 4 * kInstrSize);
+      Assembler::FlushICacheWithoutIsolate(pc, 4 * kInstrSize);
     }
   }
 }
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ARM_ASSEMBLER_ARM_INL_H_
